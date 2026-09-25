@@ -13,6 +13,7 @@ use lu_core::{
     MarketId, Px,
 };
 use lu_flow::Aligner;
+use lu_metrics::{Metrics, MetricsView};
 use lu_telemetry::LatencyHist;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -160,6 +161,10 @@ pub struct EngineConfig {
     pub publish_ms: u64,
     /// Niveles en el top publicado.
     pub top_levels: usize,
+    /// Período de publicación de las métricas F3 (ms).
+    pub metrics_ms: u64,
+    /// Velas cerradas publicadas por temporalidad.
+    pub closed_candles: usize,
 }
 
 impl Default for EngineConfig {
@@ -168,12 +173,14 @@ impl Default for EngineConfig {
             tick_ms: 50,
             publish_ms: 250,
             top_levels: 10,
+            metrics_ms: 1_000,
+            closed_candles: 12,
         }
     }
 }
 
 /// Observador del libro en el nodo: alineador F2 con su resumen.
-pub type Obs = Aligner<FlowAgg>;
+pub type Obs = Aligner<(FlowAgg, Metrics)>;
 
 /// Motor de un mercado.
 pub struct Engine<R: SeqRule> {
@@ -182,6 +189,7 @@ pub struct Engine<R: SeqRule> {
     rx: Receiver<EngineMsg>,
     snap_req: tokio::sync::mpsc::UnboundedSender<()>,
     view: Arc<ArcSwap<BookView>>,
+    metrics_view: Arc<ArcSwap<MetricsView>>,
     counters: Arc<IngestCounters>,
     rest: Arc<RestClient>,
     cfg: EngineConfig,
@@ -203,6 +211,7 @@ impl<R: SeqRule> Engine<R> {
         rx: Receiver<EngineMsg>,
         snap_req: tokio::sync::mpsc::UnboundedSender<()>,
         view: Arc<ArcSwap<BookView>>,
+        metrics_view: Arc<ArcSwap<MetricsView>>,
         counters: Arc<IngestCounters>,
         rest: Arc<RestClient>,
         cfg: EngineConfig,
@@ -214,6 +223,7 @@ impl<R: SeqRule> Engine<R> {
             rx,
             snap_req,
             view,
+            metrics_view,
             counters,
             rest,
             cfg,
@@ -232,6 +242,7 @@ impl<R: SeqRule> Engine<R> {
         tracing::info!(market = %self.label, "motor iniciado");
         let tick = Duration::from_millis(self.cfg.tick_ms);
         let mut next_publish = 0u64;
+        let mut next_metrics = 0u64;
         loop {
             match self.rx.recv_timeout(tick) {
                 Ok(EngineMsg::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
@@ -245,8 +256,13 @@ impl<R: SeqRule> Engine<R> {
                 self.publish();
                 next_publish = now + self.cfg.publish_ms;
             }
+            if now >= next_metrics {
+                self.publish_metrics();
+                next_metrics = now + self.cfg.metrics_ms;
+            }
         }
         self.publish();
+        self.publish_metrics();
         tracing::info!(market = %self.label, "motor detenido");
     }
 
@@ -301,6 +317,10 @@ impl<R: SeqRule> Engine<R> {
         }
         if !self.dedup.accept(t.agg_id) {
             self.trades.dup += 1;
+            // Marca de agua por línea (F2): el duplicado prueba que esta línea ya pasó `E`.
+            self.sync
+                .observer_mut()
+                .observe_line(t.rx.line, t.exch_ts_ms);
             return;
         }
         if let Some(c) = self.trades_first.get_mut(usize::from(t.rx.line)) {
@@ -335,6 +355,12 @@ impl<R: SeqRule> Engine<R> {
         if let Some(r) = st.resync {
             tracing::warn!(market = %self.label, reason = r.as_str(), "RESYNC");
         }
+    }
+
+    fn publish_metrics(&self) {
+        let m = &self.sync.observer().sink().1;
+        self.metrics_view
+            .store(Arc::new(m.view(self.cfg.closed_candles)));
     }
 
     fn publish(&mut self) {
@@ -420,9 +446,11 @@ impl<R: SeqRule> Engine<R> {
                     open_batches: al.open_batches(),
                     buffered_trades: al.buffered_trades(),
                     finalized_until_ms: al.finalized_until(),
-                    totals: al.sink().totals.clone(),
-                    last_batch: al.sink().last_batch,
-                    recent: al.sink().recent.iter().copied().collect(),
+                    totals: al.sink().0.totals.clone(),
+                    last_batch: al.sink().0.last_batch,
+                    recent: al.sink().0.recent.iter().copied().collect(),
+                    walls: al.sink().1.wall_stats().clone(),
+                    recent_walls: al.sink().1.walls().rev().take(10).copied().collect(),
                 }
             },
             ingest_dropped: self.counters.dropped.load(Ordering::Relaxed),

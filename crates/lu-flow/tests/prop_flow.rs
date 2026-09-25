@@ -619,3 +619,67 @@ fn diffs_con_mismo_tiempo_se_fusionan_conservando_q0() {
     assert_eq!(f.cancelado_min, Qty::from_units(5));
     assert_eq!(a.sink().batches.len(), 2);
 }
+
+#[test]
+fn marca_de_agua_espera_a_todas_las_lineas_vivas() {
+    let mut a = Aligner::new(AlignerConfig::default(), Collect::default());
+    let mut b = L2Book::new();
+    b.load_snapshot(&DepthSnapshot {
+        last_update_id: 1,
+        limit: 5000,
+        bids: vec![Level {
+            px: Px::from_units(99),
+            qty: Qty::from_units(10),
+        }],
+        asks: vec![],
+        exch_ts_ms: None,
+        rx: RxStamp::default(),
+    });
+    a.on_rebuild(1, &b);
+    let d = |id: u64, ts: u64| DepthDiff {
+        first_id: id,
+        last_id: id,
+        prev_last_id: None,
+        exch_ts_ms: ts,
+        match_ts_ms: None,
+        bids: vec![],
+        asks: vec![],
+        rx: RxStamp::default(),
+    };
+    let tr = |id: u64, ts: u64, line: u8| AggTrade {
+        agg_id: id,
+        first_trade_id: id,
+        last_trade_id: id,
+        px: Px::from_units(99),
+        qty: Qty::from_units(1),
+        qty_normal: None,
+        aggressor: Aggressor::Sell,
+        trade_ts_ms: ts,
+        exch_ts_ms: ts,
+        rx: RxStamp {
+            line,
+            ..RxStamp::default()
+        },
+    };
+    // Ambas líneas vivas.
+    a.on_trade(&tr(1, 90, 0));
+    a.observe_line(1, 90);
+    a.on_diff_applied(&d(2, 100));
+    a.on_diff_applied(&d(3, 200));
+    a.on_diff_applied(&d(4, 300));
+    // La línea A perdió el trade 2 (T=150) y ya entrega el 3 (T=260).
+    a.on_trade(&tr(3, 260, 0));
+    assert_eq!(
+        a.finalized_until(),
+        0,
+        "nada cierra: la línea B sigue en 90"
+    );
+    // La línea B entrega el 2: se alinea, no llega tarde.
+    a.on_trade(&tr(2, 150, 1));
+    a.observe_line(1, 260);
+    assert_eq!(a.stats().late, 0);
+    assert_eq!(a.finalized_until(), 200);
+    let f = a.sink().flows.iter().find(|f| f.end_ts_ms == 200).unwrap();
+    assert_eq!(f.exec, Qty::from_units(1));
+    assert_eq!(a.unaccounted(), 0);
+}

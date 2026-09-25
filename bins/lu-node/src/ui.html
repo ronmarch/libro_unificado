@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Libro Unificado</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect x=%222%22 y=%223%22 width=%225%22 height=%2210%22 fill=%22%230f8a5f%22/%3E%3Crect x=%229%22 y=%225%22 width=%225%22 height=%228%22 fill=%22%23c2372f%22/%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#f5f6f8;--card:#fff;--text:#16191d;--muted:#5d6570;--line:#e1e4e8;
+  --bid:#0f8a5f;--bid-soft:rgba(15,138,95,.14);--ask:#c2372f;--ask-soft:rgba(194,55,47,.14);
+  --accent:#2b5fd9;--warn:#b26a00;--warn-soft:#fff3e0;--bad:#c2372f;--bad-soft:#fdecec;--ok:#0f8a5f;
+  --mono:ui-monospace,SFMono-Regular,Consolas,"Ubuntu Mono",monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0c0f13;--card:#151a20;--text:#e7ebf0;--muted:#8f99a5;--line:#262d36;
+  --bid:#35c48f;--bid-soft:rgba(53,196,143,.16);--ask:#ff6b61;--ask-soft:rgba(255,107,97,.16);
+  --accent:#7aa2ff;--warn:#f0ad4e;--warn-soft:#2a2112;--bad:#ff6b61;--bad-soft:#2d1516;--ok:#35c48f;
+}}
+:root[data-theme="dark"]{
+  --bg:#0c0f13;--card:#151a20;--text:#e7ebf0;--muted:#8f99a5;--line:#262d36;
+  --bid:#35c48f;--bid-soft:rgba(53,196,143,.16);--ask:#ff6b61;--ask-soft:rgba(255,107,97,.16);
+  --accent:#7aa2ff;--warn:#f0ad4e;--warn-soft:#2a2112;--bad:#ff6b61;--bad-soft:#2d1516;--ok:#35c48f;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Ubuntu,Roboto,sans-serif}
+header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--card);position:sticky;top:0;z-index:2}
+h1{font-size:1.05rem;margin:0}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--muted);display:inline-block}
+.dot.on{background:var(--ok)}.dot.off{background:var(--bad)}
+.tabs{display:flex;gap:6px}
+.tab{border:1px solid var(--line);background:transparent;color:var(--text);border-radius:8px;padding:5px 12px;cursor:pointer;font:inherit}
+.tab.active{border-color:var(--accent);color:var(--accent);font-weight:600}
+.spacer{flex:1}
+.icon-btn{border:1px solid var(--line);background:transparent;color:var(--text);border-radius:8px;padding:5px 9px;cursor:pointer}
+main{max-width:1400px;margin:0 auto;padding:16px;display:grid;gap:14px;grid-template-columns:repeat(12,1fr)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;min-width:0}
+.card h2{font-size:.95rem;margin:0 0 10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.c3{grid-column:span 3}.c4{grid-column:span 4}.c5{grid-column:span 5}.c7{grid-column:span 7}.c8{grid-column:span 8}.c12{grid-column:span 12}
+@media (max-width:1100px){.c3,.c4,.c5,.c7,.c8{grid-column:span 12}}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px}
+.kv dt{color:var(--muted)}.kv dd{margin:0;text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+.badge{font-size:.75rem;padding:2px 8px;border-radius:99px;font-weight:600}
+.badge.live{background:var(--bid-soft);color:var(--bid)}.badge.syncing{background:var(--warn-soft);color:var(--warn)}
+.bad{color:var(--bad);font-weight:700}.muted{color:var(--muted)}
+table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12.5px;font-variant-numeric:tabular-nums}
+th{font-family:system-ui,sans-serif;font-weight:600;color:var(--muted);text-align:right;padding:4px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{text-align:right;padding:3px 6px;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+.scroll{overflow-x:auto}
+.ladder td{position:relative}
+.bar{position:absolute;top:2px;bottom:2px;right:0;border-radius:3px;z-index:0}
+.ladder td span{position:relative;z-index:1}
+.bid{color:var(--bid)}.ask{color:var(--ask)}
+tr.mid td{border-top:1px dashed var(--line);border-bottom:1px dashed var(--line);color:var(--muted);text-align:center}
+.fp td.b{background:var(--bid-soft)}.fp td.a{background:var(--ask-soft)}
+.fp tr.midrow td{outline:1px solid var(--accent);outline-offset:-1px}
+.seg{display:flex;gap:4px;margin-left:auto}
+.seg button{white-space:nowrap;border:1px solid var(--line);background:transparent;color:var(--text);border-radius:6px;padding:2px 8px;cursor:pointer;font:inherit;font-size:.8rem}
+.seg button.active{border-color:var(--accent);color:var(--accent)}
+.empty{color:var(--muted);text-align:center;padding:18px}
+.lines{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px}
+.line{border:1px solid var(--line);border-radius:8px;padding:8px;font-family:var(--mono);font-size:12px}
+.note{font-size:.78rem;color:var(--muted);margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="conn" title="conexión"></span>
+  <h1>Libro Unificado</h1>
+  <div class="tabs" id="tabs"></div>
+  <div class="spacer"></div>
+  <span class="muted" id="clock"></span>
+  <button class="icon-btn" id="theme" title="Tema claro / oscuro">◐</button>
+</header>
+<main>
+  <section class="card c3"><h2>Estado <span class="badge" id="phase">—</span></h2><dl class="kv" id="state"></dl></section>
+  <section class="card c4"><h2>Libro (top 10)</h2><div class="scroll"><table class="ladder" id="ladder"></table></div></section>
+  <section class="card c5"><h2>Flujo F2 <span class="muted" style="font-weight:400;font-size:.8rem">cotas inferiores</span></h2><dl class="kv" id="flow"></dl>
+    <div class="scroll" style="margin-top:10px"><table id="recent"></table></div></section>
+  <section class="card c8"><h2>Footprint F3 <span class="muted" id="fpmeta" style="font-weight:400;font-size:.8rem"></span>
+    <div class="seg" id="tf"><button data-i="0" class="active">15 m</button><button data-i="1">1 h</button><button data-i="2">4 h</button></div></h2>
+    <div class="scroll"><table class="fp" id="fp"></table></div>
+    <div class="note">TWA = promedio ponderado por tiempo del bucket en la vela · Persist. = foto ÷ TWA · NV/Canc = Σ cotas inferiores F2 · Buckets de 1 USDT alrededor del precio medio.</div></section>
+  <section class="card c4"><h2>Muros retirados</h2><dl class="kv" id="wallstats"></dl><div class="scroll" style="margin-top:10px"><table id="walls"></table></div></section>
+  <section class="card c12"><h2>Líneas redundantes</h2><div class="lines" id="lines"></div></section>
+</main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const root = document.documentElement;
+  try { const t = localStorage.getItem("lu-theme"); if (t) root.dataset.theme = t; } catch (e) {}
+  $("theme").onclick = () => {
+    const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    root.dataset.theme = dark ? "light" : "dark";
+    try { localStorage.setItem("lu-theme", root.dataset.theme); } catch (e) {}
+  };
+
+  const state = { markets: [], sel: null, book: {}, fp: {}, tf: 0, dirty: false };
+  try { state.tf = +localStorage.getItem("lu-tf") || 0; } catch (e) {}
+  const n = s => (s == null ? NaN : Number(s));
+  const fmt = (s, d = 3) => { const v = n(s); return isFinite(v) ? v.toLocaleString("es-CL", { maximumFractionDigits: d }) : "—"; };
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const kv = (rows) => rows.map(([k, v, cls]) => `<dt>${esc(k)}</dt><dd class="${cls || ""}">${v}</dd>`).join("");
+  const time = ms => ms ? new Date(ms).toISOString().slice(11, 23) : "—";
+
+  function tabs() {
+    $("tabs").innerHTML = state.markets.map(m => `<button class="tab ${m === state.sel ? "active" : ""}" data-m="${esc(m)}">${esc(m)}</button>`).join("");
+    $("tabs").querySelectorAll("button").forEach(b => b.onclick = () => { state.sel = b.dataset.m; tabs(); state.dirty = true; });
+  }
+  document.querySelectorAll("#tf button").forEach(b => b.onclick = () => {
+    state.tf = +b.dataset.i;
+    try { localStorage.setItem("lu-tf", state.tf); } catch (e) {}
+    document.querySelectorAll("#tf button").forEach(x => x.classList.toggle("active", x === b));
+    state.dirty = true;
+  });
+  document.querySelectorAll("#tf button").forEach(x => x.classList.toggle("active", +x.dataset.i === state.tf));
+
+  function renderBook(v) {
+    $("phase").textContent = v.phase;
+    $("phase").className = "badge " + v.phase;
+    const unacc = v.unaccounted !== 0, funacc = v.flow && v.flow.unaccounted !== 0;
+    $("state").innerHTML = kv([
+      ["Mercado", esc(v.market)],
+      ["Época", v.epoch],
+      ["Resyncs", Object.entries(v.sync).filter(([k]) => k.startsWith("resync_")).reduce((a, [, x]) => a + x, 0)],
+      ["Antigüedad libro", v.book_age_ms + " ms"],
+      ["Precio medio", fmt(v.mid, 4)],
+      ["Spread", v.spread_bps == null ? "—" : v.spread_bps.toFixed(2) + " bps"],
+      ["Niveles bid / ask", v.levels[0] + " / " + v.levels[1]],
+      ["Pendientes / buffer", v.pending + " / " + v.buffer],
+      ["Diffs sin contabilizar", v.unaccounted, unacc ? "bad" : ""],
+      ["Trades sin contabilizar", v.flow ? v.flow.unaccounted : "—", funacc ? "bad" : ""],
+      ["Cola descartados", v.ingest_dropped, v.ingest_dropped ? "bad" : ""],
+      ["Errores de parseo", v.parse_errors, v.parse_errors ? "bad" : ""],
+    ]);
+    const asks = v.top_asks.slice().reverse(), bids = v.top_bids;
+    const max = Math.max(1, ...asks.map(l => n(l.qty)), ...bids.map(l => n(l.qty)));
+    const row = (l, side) => `<tr><td class="${side}"><span>${fmt(l.px, 4)}</span></td><td><div class="bar" style="width:${(n(l.qty) / max * 100).toFixed(1)}%;background:var(--${side}-soft)"></div><span>${fmt(l.qty)}</span></td></tr>`;
+    $("ladder").innerHTML = v.phase !== "live" ? `<tr><td class="empty" colspan="2">sincronizando…</td></tr>` :
+      `<tr><th>Precio</th><th>Cantidad</th></tr>` + asks.map(l => row(l, "ask")).join("") +
+      `<tr class="mid"><td colspan="2">${fmt(v.mid, 4)} · ${v.spread_bps == null ? "" : v.spread_bps.toFixed(2) + " bps"}</td></tr>` + bids.map(l => row(l, "bid")).join("");
+
+    const f = v.flow, t = f.totals, s = f.stats;
+    $("flow").innerHTML = kv([
+      ["Trades alineados / tardíos", s.aligned + " / " + s.late, s.late ? "bad" : ""],
+      ["Contaminados / en sync", s.contaminated + " / " + s.syncing],
+      ["Lotes abiertos", f.open_batches],
+      ["Ejecutado vs bids · asks", `<span class="bid">${fmt(t.exec_bid)}</span> · <span class="ask">${fmt(t.exec_ask)}</span>`],
+      ["No visible ≥ (bid · ask)", `<span class="bid">${fmt(t.no_visible_min_bid)}</span> · <span class="ask">${fmt(t.no_visible_min_ask)}</span>`],
+      ["Cancelado ≥ (bid · ask)", `<span class="bid">${fmt(t.cancelado_min_bid)}</span> · <span class="ask">${fmt(t.cancelado_min_ask)}</span>`],
+      ["Ejecutado RPI", fmt(t.exec_rpi)],
+    ]);
+    const rec = (f.recent || []).slice(-12).reverse();
+    $("recent").innerHTML = rec.length ? `<tr><th>Hora</th><th>Lado</th><th>Precio</th><th>q0→q1</th><th>Ejec.</th><th>NV≥</th><th>Canc≥</th></tr>` +
+      rec.map(r => `<tr><td>${time(r.end_ts_ms)}</td><td class="${r.side}">${r.side}</td><td>${fmt(r.px, 4)}</td><td>${fmt(r.q0)}→${fmt(r.q1)}</td><td>${fmt(r.exec)}</td><td>${fmt(r.no_visible_min)}</td><td>${fmt(r.cancelado_min)}</td></tr>`).join("")
+      : `<tr><td class="empty">sin flujos notables aún</td></tr>`;
+
+    $("lines").innerHTML = v.lines.filter(l => l.depth_up || l.trade_up || l.depth_first || l.trades_first).map(l =>
+      `<div class="line"><b>Línea ${"ABCD"[l.line]}</b> ${l.depth_up ? "🟢" : "🔴"} depth ${l.trade_up ? "🟢" : "⚪"} trades<br>` +
+      `p50 ${l.depth_latency.p50_ms.toFixed(1)} ms · p99 ${l.depth_latency.p99_ms.toFixed(1)} ms<br>` +
+      `primero: ${l.depth_first} diffs · ${l.trades_first} trades<br>desconexiones: ${l.disconnects}</div>`).join("") || `<div class="empty">sin líneas activas</div>`;
+  }
+
+  function renderFootprint(m, mid) {
+    const c = m && m.current && m.current[state.tf];
+    if (!c) { $("fp").innerHTML = `<tr><td class="empty">sin datos todavía</td></tr>`; $("fpmeta").textContent = ""; return; }
+    $("fpmeta").textContent = `${time(c.start_ms).slice(0, 5)}–${time(c.end_ms).slice(0, 5)} UTC · Δ ${fmt(c.delta)} · observado ${(c.observed_ms / 60000).toFixed(1)} min${c.clean ? "" : " · no limpia"}`;
+    const by = {};
+    for (const x of c.cells) { (by[x.bucket] = by[x.bucket] || {})[x.side] = x; }
+    const midB = isFinite(n(mid)) ? Math.floor(n(mid)) : null;
+    let keys = Object.keys(by).map(Number).sort((a, b) => b - a);
+    if (midB != null) keys = keys.filter(k => Math.abs(k - midB) <= 15);
+    const cell = (x, side) => x ? `<td class="${side === "bid" ? "b" : "a"}">${fmt(x.twa, 1)}</td><td>${fmt(x.qty, 1)}</td><td>${x.persistence == null ? "—" : x.persistence.toFixed(2)}</td><td>${fmt(x.exec, 2)}</td><td>${fmt(x.no_visible_min, 2)}</td><td>${fmt(x.cancelado_min, 2)}</td>` : `<td colspan="6" class="muted">·</td>`;
+    $("fp").innerHTML = keys.length ? `<tr><th>Bucket</th><th>TWA bid</th><th>Foto</th><th>Persist.</th><th>Ejec.</th><th>NV≥</th><th>Canc≥</th><th>TWA ask</th><th>Foto</th><th>Persist.</th><th>Ejec.</th><th>NV≥</th><th>Canc≥</th></tr>` +
+      keys.map(k => `<tr class="${k === midB ? "midrow" : ""}"><td>${k}</td>${cell(by[k].bid, "bid")}${cell(by[k].ask, "ask")}</tr>`).join("")
+      : `<tr><td class="empty">sin celdas</td></tr>`;
+  }
+
+  function renderWalls(m) {
+    const s = (m && m.wall_stats) || {};
+    $("wallstats").innerHTML = kv([
+      ["Detectados / evaluados", `${s.fired || 0} / ${s.evaluated || 0}`],
+      ["Rechazos percentil · distancia", `${s.rejected_percentile || 0} · ${s.rejected_distance || 0}`],
+      ["Rechazos ejecución · contaminado", `${s.rejected_exec || 0} · ${s.rejected_contaminated || 0}`],
+    ]);
+    const w = ((m && m.walls) || []).slice(-10).reverse();
+    $("walls").innerHTML = w.length ? `<tr><th>Hora</th><th>Lado</th><th>Bucket</th><th>Inicio→ahora</th><th>Ejec./caída</th></tr>` +
+      w.map(x => `<tr><td>${time(x.ts_ms)}</td><td class="${x.side}">${x.side}</td><td>${x.bucket}</td><td>${fmt(x.start_qty, 1)}→${fmt(x.qty, 1)}</td><td>${(x.exec_ratio * 100).toFixed(1)} %</td></tr>`).join("")
+      : `<tr><td class="empty">ninguno aún (P90 · X 50 % · N 2 · Y 20 %)</td></tr>`;
+  }
+
+  function frame() {
+    if (state.dirty && state.sel) {
+      state.dirty = false;
+      const b = state.book[state.sel];
+      if (b) renderBook(b);
+      renderFootprint(state.fp[state.sel], b && b.mid);
+      renderWalls(state.fp[state.sel]);
+      $("clock").textContent = b ? "exchange " + time(b.exch_ts_ms) + " UTC" : "";
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  let backoff = 500;
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws?interval_ms=250`);
+    ws.onopen = () => { $("conn").className = "dot on"; backoff = 500; };
+    ws.onclose = () => { $("conn").className = "dot off"; setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 10000); };
+    ws.onmessage = ev => {
+      let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.type === "hello") { state.markets = m.markets; if (!state.sel || !m.markets.includes(state.sel)) state.sel = m.markets[0]; tabs(); }
+      else if (m.type === "book") state.book[m.key] = m.data;
+      else if (m.type === "footprint") state.fp[m.key] = m.data;
+      state.dirty = true;
+    };
+  }
+  connect();
+})();
+</script>
+</body>
+</html>

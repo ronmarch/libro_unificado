@@ -50,7 +50,7 @@
 //! Todo trade recibido queda contabilizado exactamente una vez
 //! (`unaccounted() == 0`), igual que los diffs en `lu-book`.
 
-use lu_book::{BookObserver, L2Book, ResyncReason};
+use lu_book::{BookObserver, L2Book, ResyncReason, MAX_LINES};
 use lu_core::{AggTrade, Aggressor, DepthDiff, Px, Qty, Side};
 use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
@@ -70,6 +70,9 @@ pub struct AlignerConfig {
     pub max_trades: usize,
     /// Máximo de lotes abiertos (salvaguarda: se fuerzan cierres).
     pub max_open_batches: usize,
+    /// Una línea cuyo último `E` quedó más atrás que esto respecto de la más
+    /// adelantada deja de frenar la marca de agua (línea caída o atascada) (ms).
+    pub line_stale_ms: u64,
 }
 
 impl Default for AlignerConfig {
@@ -79,6 +82,7 @@ impl Default for AlignerConfig {
             boundary_slack_ms: 0,
             max_trades: 200_000,
             max_open_batches: 4_096,
+            line_stale_ms: 1_000,
         }
     }
 }
@@ -258,7 +262,7 @@ pub struct Aligner<S: FlowSink = ()> {
     finalized_until: u64,
     trades: BTreeMap<(u64, u64), TradeRec>,
     uncounted: u64,
-    trade_wm: u64,
+    line_wm: [u64; MAX_LINES],
     depth_wm: u64,
     stats: AlignerStats,
 }
@@ -280,7 +284,7 @@ impl<S: FlowSink> Aligner<S> {
             finalized_until: 0,
             trades: BTreeMap::new(),
             uncounted: 0,
-            trade_wm: 0,
+            line_wm: [0; MAX_LINES],
             depth_wm: 0,
             stats: AlignerStats::default(),
         }
@@ -331,10 +335,11 @@ impl<S: FlowSink> Aligner<S> {
             self.stats.syncing += 1;
             return;
         }
-        self.trade_wm = self.trade_wm.max(t.exch_ts_ms);
+        // La marca de la propia línea avanza DESPUÉS de insertar el trade (al final).
         let ts = t.trade_ts_ms;
         if self.finalized_until > 0 && ts <= self.finalized_until {
             self.stats.late += 1;
+            self.bump_line(t.rx.line, t.exch_ts_ms);
             return;
         }
         let d = self.cfg.boundary_slack_ms;
@@ -355,6 +360,7 @@ impl<S: FlowSink> Aligner<S> {
         match self.trades.entry((ts, t.agg_id)) {
             std::collections::btree_map::Entry::Occupied(_) => {
                 self.stats.duplicate += 1;
+                self.bump_line(t.rx.line, t.exch_ts_ms);
                 return;
             }
             std::collections::btree_map::Entry::Vacant(v) => {
@@ -362,6 +368,7 @@ impl<S: FlowSink> Aligner<S> {
             }
         }
         self.uncounted += 1;
+        self.bump_line(t.rx.line, t.exch_ts_ms);
         while self.trades.len() > self.cfg.max_trades {
             if let Some((_, r)) = self.trades.pop_first() {
                 if !r.counted {
@@ -376,6 +383,35 @@ impl<S: FlowSink> Aligner<S> {
         self.close_ready();
     }
 
+    /// Entrada: trade DUPLICADO (otra línea ya lo entregó y el deduplicador lo
+    /// descartó). Solo alimenta la marca de agua por línea: en un socket los
+    /// mensajes llegan en orden de `E`, pero un trade perdido en la línea rápida
+    /// puede llegar después por la lenta; el lote espera a todas las líneas vivas.
+    /// Los trades únicos entran por [`Aligner::on_trade`], que ya avanza su línea.
+    pub fn observe_line(&mut self, line: u8, exch_ts_ms: u64) {
+        self.bump_line(line, exch_ts_ms);
+        if self.live {
+            self.close_ready();
+        }
+    }
+
+    fn bump_line(&mut self, line: u8, exch_ts_ms: u64) {
+        if let Some(w) = self.line_wm.get_mut(usize::from(line)) {
+            *w = (*w).max(exch_ts_ms);
+        }
+    }
+
+    /// Marca de agua efectiva de trades: mínimo entre las líneas vivas.
+    pub fn trade_watermark(&self) -> u64 {
+        let top = self.line_wm.iter().copied().max().unwrap_or(0);
+        self.line_wm
+            .iter()
+            .copied()
+            .filter(|&w| w > 0 && w + self.cfg.line_stale_ms >= top)
+            .min()
+            .unwrap_or(0)
+    }
+
     // ---------------------------------------------------------------- interno
 
     fn close_ready(&mut self) {
@@ -384,7 +420,7 @@ impl<S: FlowSink> Aligner<S> {
             let end = self.batches[0].end;
             // `E` es monotónico por socket y ≥ tiempo real de ejecución; `T` difiere
             // del real hasta δ ⇒ con E > fin + 2δ ya llegaron todos los T ≤ fin + δ.
-            if self.trade_wm > end + 2 * d {
+            if self.trade_watermark() > end + 2 * d {
                 self.stats.closed_by_trades += 1;
             } else if self.depth_wm >= end + d + self.cfg.watermark_ms {
                 self.stats.closed_by_timeout += 1;

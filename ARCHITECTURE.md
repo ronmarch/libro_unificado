@@ -1,11 +1,13 @@
-# Libro Unificado — Arquitectura (F0 + F1 + F2)
+# Libro Unificado — Arquitectura (F0 – F5)
 
 Sistema **independiente de FORJA**. Mantiene en RAM, en tiempo real, libros L2
 exactos por venue y mercado, como base del libro unificado multi-exchange
 (Binance, OKX, Bybit, Coinbase, Kraken; spot y perpetuos). Sin almacenamiento:
 es un sistema de monitoreo, no de validación histórica.
 
-Estado: **F0 (fundaciones), F1 (libro Binance spot + USDⓈ-M sincronizado) y F2 (alineador trades ↔ depth) completas.**
+Estado: **F0 – F5 completas para Binance** (libro sincronizado, alineador F2, métricas F3,
+API WebSocket + UI F4, simulador con caos y soak F5). Pendiente: venues 2–5 y dos
+métricas de F3 sin definición (ver §9).
 
 ---
 
@@ -30,12 +32,13 @@ libro-unificado/
 ├── crates/lu-core       tipos: Px/Qty punto fijo, MarketId, eventos normalizados, relojes
 ├── crates/lu-book       L2Book + SyncBook (máquina de estados) + SeqRule + BookObserver
 ├── crates/lu-flow       F2: alineador trades ↔ depth, cotas inferiores por nivel y lote
+├── crates/lu-metrics    F3: velas footprint (TWA perezoso) y detector de muros retirados
 ├── crates/lu-telemetry  histogramas HDR de latencia + escritor Prometheus
 ├── crates/lu-binance    conector: endpoints, parseo zero-copy, REST, líneas WS, TLS
-└── bins/lu-node         nodo: motores por mercado, snapshots, API HTTP
+└── bins/lu-node         nodo: motores, snapshots, API HTTP + WebSocket + UI, simulador y caos
 ```
 
-Regla de dependencias: `lu-core` ← `lu-book` ← `lu-flow` ← `lu-node`; `lu-core` ← `lu-binance` ← `lu-node`.
+Regla de dependencias: `lu-core` ← `lu-book` ← `lu-flow` ← `lu-metrics` ← `lu-node`; `lu-core` ← `lu-binance` ← `lu-node`.
 `lu-book` no conoce a ningún exchange concreto salvo por sus `SeqRule`.
 
 ---
@@ -125,8 +128,12 @@ El alineador es el `BookObserver` del `SyncBook` en cada motor; los trades
 * **Incertidumbre temporal δ** (`boundary_slack_ms`, default 0 = especificación literal):
   `e_lo` suma solo trades a más de δ de las fronteras; `e_hi` incluye los ambiguos de
   ambos lotes vecinos. Las cotas siguen siendo válidas si `|T − tiempo real| ≤ δ`.
-* **Marca de agua**: un lote cierra cuando existe uno posterior y llegó un trade con
-  `E > fin + 2δ` (orden por socket), o el depth avanzó `fin + δ + 250 ms` (trades quietos).
+* **Marca de agua por línea**: un lote cierra cuando existe uno posterior y **todas las
+  líneas vivas** entregaron un trade (único o duplicado) con `E > fin + 2δ` (orden por
+  socket), o el depth avanzó `fin + δ + 250 ms` (trades quietos). Una línea cuyo `E` queda
+  más de 1 s atrás de la más adelantada deja de frenar. Motivo: un trade perdido en la
+  línea rápida llega después por la lenta; con una marca global llegaba `late`
+  (observado en el simulador con caos: 3 tardíos → 0 tras el cambio).
   Un trade cuyo lote ya cerró se cuenta `late` (no se re-emite).
 * **Épocas**: el primer lote tras un snapshot y todo lote abierto al perder la
   sincronización son **contaminados**: `q0`/`q1` exactos, cotas en 0. Nunca se mezclan épocas.
@@ -148,6 +155,62 @@ RPI, socket de trades con latencia):
 Prueba de mutación: invertir `e_lo`/`e_hi`, romper la resolución de `q0` o la fusión de
 diffs hace fallar las propiedades. Dos mutantes sobreviven por ser equivalentes bajo el
 modelo (margen `2δ` de la marca de agua; frontera de lote ya podada).
+
+## 5 ter. F3 — Métricas (`lu-metrics`)
+
+`Metrics` implementa `FlowSink`; el alineador lo alimenta junto con el resumen del nodo
+(`Aligner<(FlowAgg, Metrics)>`). Aritmética entera (`i128` para áreas `qty·ms`).
+
+* **Velas** 15 m / 1 h / 4 h alineadas a UTC, contiguas (un libro quieto también produce
+  velas). Por bucket de 1 USDT y lado: TWA, foto (cantidad al cierre), persistencia =
+  foto ÷ TWA, ejecutado (sin RPI), RPI aparte, fills, trades, Σ `no_visible_min`,
+  Σ `cancelado_min`, Σ `agregado_min`. Por vela: ejecutado comprador/vendedor y delta de trades.
+* **TWA perezoso**: `acc += qty_prev · Δt` solo al cambiar; el denominador es el tiempo con
+  libro sincronizado (las pausas por resync no se promedian). Un cambio se fecha al fin
+  de su lote. Vela iniciada a mitad o con pausa/lote contaminado: `clean = false`.
+* **Cobertura**: buckets que tocan `bid_floor`/`ask_ceiling` se marcan `partial` y no
+  entran al percentil. (Con un solo venue la banda es la del propio snapshot.)
+* **Muros retirados**: implementación exacta de §9 (P, X, N, Y como configuración con los
+  valores confirmados). Detalles de implementación: percentil de rango más cercano sobre
+  áreas de la vela 4 h en curso (mismo lado, dentro de cobertura); la ventana empieza
+  cuando el bucket estaba ≥ TWA justo antes de un cambio e incluye las ejecuciones de ese
+  lote; cada ventana se evalúa una vez, en el cruce; ventana con lote contaminado ⇒ rechazo.
+  Contadores de rechazo por causa.
+
+Verificación (`crates/lu-metrics/tests/prop_metrics.rs`): **M1** TWA, tiempo observado y
+Σ ejecutado de toda vela cerrada coinciden **exactamente** con una integración por fuerza
+bruta, con cortes y reconstrucciones aleatorias; **M2** siete escenarios del detector
+(dispara; rechazos por ejecución en el borde exacto de 20 %, distancia, percentil,
+contaminación; sin cruce de X no evalúa; caída gradual acumula ejecuciones de la ventana).
+Mutaciones de área, pausa, reanudación, percentil y ventana hacen fallar las pruebas.
+
+## 5 quater. F4 — API en vivo e interfaz
+
+* `GET /ws?markets=spot,perp&interval_ms=250`: `hello`, luego `book` (cada intervalo,
+  100..5000 ms) y `footprint` (cuando cambia, ≤ 1 Hz). Máximo 16 sesiones; mensajes de
+  entrada ≤ 64 KiB; un cliente que tarda > 2 s en recibir se desconecta (nunca frena al nodo).
+* `GET /footprint/<m>`: `MetricsView` (velas en curso, 12 cerradas por temporalidad, muros).
+* `GET /` o `/ui`: interfaz autocontenida (sin CDN): estado, escalera top 10, flujo F2,
+  footprint por temporalidad alrededor del precio medio, muros retirados y líneas A/B.
+  Modo claro/oscuro, apta para móvil, reconexión con backoff.
+
+## 5 quinquies. F5 — Simulador, caos y soak
+
+* `--sim`: exchange sintético con reglas de secuencia de Binance (spot contiguo; perp con
+  saltos y `pu`), lotes de 100 ms, límites, cancelaciones, barridos, icebergs, RPI en perp;
+  responde snapshots. Entrega al **motor real** por líneas redundantes.
+* Caos: `--chaos-drop` (pérdida por evento y línea), `--chaos-jitter-ms`,
+  `--chaos-outage-s` (cortes de 5–30 s), `--chaos-snapshot-fail`.
+* **P2 en vivo**: un verificador compara el top 10 publicado con la verdad del simulador en
+  el mismo `last_update_id` (`lu_sim_checks_total{result="mismatch"}` debe ser 0).
+* `deploy/soak.sh URL HORAS INTERVALO`: CSV + corte ante la primera violación de
+  invariantes. `deploy/chaos-sim.sh MIN SEMILLA`: caos reproducible sin red.
+  `deploy/alerts.yml`: reglas Prometheus.
+
+Resultado (2026-09-25, release, 2 min, 2 % de pérdida por línea, cortes, 10–20 % de
+snapshots fallidos): 758 verificaciones contra la verdad, **0 discrepancias**, 0 diffs y
+0 trades sin contabilizar, 0 tardíos, ~81 000 trades alineados, recuperación tras cada
+resync provocado. El soak de 72 h queda para la VM definitiva.
 
 ## 6. Hallazgos de la API de Binance (2025–2026) incorporados
 
@@ -199,9 +262,9 @@ La latencia depende de la ubicación del servidor; en la VM definitiva debe medi
 | Fase | Contenido |
 |---|---|
 | ~~F2~~ | ✅ Alineador trades ↔ depth (§5 bis). Pendiente: medir en vivo `late`, `ambiguous` y calibrar δ. |
-| **F3** | Métricas vía `BookObserver`: velas footprint 15 m / 1 h / 4 h por nivel de 1 USDT (CVD del libro, TWA perezoso `acc += qty_prev·Δt`, bid/ask ejecutado, n_fills, no visible), persistencia foto ÷ TWA, táctica vs estructural, muros retirados, RPI aparte. |
-| **F4** | API WebSocket y UI. |
-| **F5** | Soak test de 72 h + caos (cortes de línea, latencia inyectada, 429). |
+| ~~F3~~ | ✅ Velas footprint, TWA, persistencia, muros retirados (§5 ter). **Sin definir (no implementado):** "CVD del libro" y "táctica vs estructural". |
+| ~~F4~~ | ✅ API WebSocket y UI (§5 quater). |
+| ~~F5~~ | ✅ Simulador, caos, soak y alertas (§5 quinquies). Pendiente: correr 72 h en la VM con Binance real. |
 | Venues 2–5 | OKX, Bybit, Coinbase, Kraken con la misma plantilla. SOLUSDC en modo sombra; SOLFDUSD excluido. |
 
 ### Detector de muros retirados (F3) — parámetros confirmados el 2026-09-25

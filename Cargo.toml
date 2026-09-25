@@ -4,6 +4,7 @@ members = [
     "crates/lu-core",
     "crates/lu-book",
     "crates/lu-flow",
+    "crates/lu-metrics",
     "crates/lu-binance",
     "crates/lu-telemetry",
     "bins/lu-node",
@@ -19,6 +20,7 @@ publish = false
 lu-core = { path = "crates/lu-core" }
 lu-book = { path = "crates/lu-book" }
 lu-flow = { path = "crates/lu-flow" }
+lu-metrics = { path = "crates/lu-metrics" }
 lu-binance = { path = "crates/lu-binance" }
 lu-telemetry = { path = "crates/lu-telemetry" }
 

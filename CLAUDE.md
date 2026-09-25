@@ -12,6 +12,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 PROPTEST_CASES=20000 cargo test -p lu-book --test prop_sync
 PROPTEST_CASES=20000 cargo test -p lu-flow --test prop_flow
+PROPTEST_CASES=20000 cargo test -p lu-metrics --test prop_metrics
 ```
 
 ## Invariantes que no se rompen
@@ -28,15 +29,17 @@ PROPTEST_CASES=20000 cargo test -p lu-flow --test prop_flow
 9. Las cotas de F2 son **inferiores**: toda fórmula nueva requiere prueba contra el simulador.
 7. Un cambio de lógica en `lu-book` requiere una prueba que falle antes del cambio.
 
-## Próximo paso: F3 — métricas
+## Estado y próximos pasos
 
-F2 está hecho (`crates/lu-flow`, ver `ARCHITECTURE.md` §5 bis). F3 consume `LevelFlow`
-implementando `FlowSink` (se componen con tuplas `(A, B)`):
+F0–F5 hechas para Binance (ver `ARCHITECTURE.md` §5 bis – §5 quinquies). Pendiente:
 
-* Velas footprint 15 m / 1 h / 4 h por nivel de 1 USDT: CVD del libro, TWA perezoso
-  `acc += qty_prev·Δt`, bid/ask ejecutado, `n_fills`, no visible, RPI aparte.
-* Persistencia foto ÷ TWA; muros retirados (parámetros confirmados abajo).
-* Solo lotes limpios (`clean`) alimentan cotas; `on_invalidate` contamina la vela en curso.
+1. **Venues 2–5** (OKX, Bybit, Coinbase, Kraken): crate `lu-<venue>` + `SeqRule`. Ojo: sus
+   feeds entregan el snapshot por el mismo WebSocket (no REST) y algunos validan con
+   checksum CRC32; puede requerir una variante de `SyncBook` por línea.
+2. **Definiciones faltantes de F3** (no inventar): "CVD del libro" y "táctica vs estructural".
+3. Soak de 72 h con Binance real en la VM (`deploy/soak.sh`) y calibrar δ de F2.
+
+Antes de tocar `lu-flow` o `lu-metrics`: `deploy/chaos-sim.sh 5` debe terminar OK.
 
 ## Reglas de trabajo
 

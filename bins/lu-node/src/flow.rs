@@ -2,6 +2,7 @@
 
 use lu_core::{Qty, Side};
 use lu_flow::{AlignerStats, BatchInfo, FlowSink, LevelFlow};
+use lu_metrics::{WallRetired, WallStats};
 use serde::Serialize;
 use std::collections::VecDeque;
 
@@ -91,4 +92,8 @@ pub struct FlowView {
     pub last_batch: Option<BatchInfo>,
     /// Flujos notables recientes (más nuevo al final).
     pub recent: Vec<LevelFlow>,
+    /// F3: contadores del detector de muros retirados.
+    pub walls: WallStats,
+    /// F3: últimos muros retirados (más nuevo primero).
+    pub recent_walls: Vec<WallRetired>,
 }

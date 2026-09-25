@@ -11,21 +11,23 @@
 mod engine;
 mod flow;
 mod http;
+mod sim;
 mod snapshot;
 mod view;
+mod ws;
 
-use arc_swap::ArcSwap;
 use engine::{ChannelSink, Engine, EngineConfig, EngineMsg, IngestCounters, StreamKind};
 use flow::FlowAgg;
 use lu_binance::{run_line, Endpoints, FrameSink, LineSpec, RestClient};
 use lu_book::{BinanceFuturesRule, BinanceSpotRule, SeqRule, SyncBook, SyncConfig};
 use lu_core::{init_clock, MarketId, MarketKind};
 use lu_flow::{Aligner, AlignerConfig};
+use lu_metrics::{Metrics, MetricsConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
-use view::BookView;
+use view::Views;
 
 const USAGE: &str = "\
 uso: lu-node [opciones]
@@ -36,7 +38,15 @@ uso: lu-node [opciones]
   --io-threads 1          hilos del runtime de E/S (default 1)
   --pin                   fija cada motor a un núcleo propio (núcleo 0 queda para SO/E/S)
   --ca-file ruta.pem      CA adicional (proxy corporativo); por defecto usa SSL_CERT_FILE si existe
-  --log info              nivel: error|warn|info|debug|trace";
+  --log info              nivel: error|warn|info|debug|trace
+
+simulación y caos (F5; sin red):
+  --sim                   exchange sintético con verdad conocida en lugar de Binance
+  --sim-seed 24301        semilla del generador
+  --chaos-drop 0.02       probabilidad de perder cada evento en cada línea
+  --chaos-jitter-ms 20    latencia adicional máxima por línea
+  --chaos-outage-s 120    segundos medios entre cortes de cada línea (0 = sin cortes)
+  --chaos-snapshot-fail 0.2  probabilidad de que un snapshot no llegue";
 
 struct Args {
     symbol: String,
@@ -47,6 +57,7 @@ struct Args {
     pin: bool,
     log: tracing::Level,
     ca_file: Option<std::path::PathBuf>,
+    sim: Option<sim::SimConfig>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -59,7 +70,10 @@ fn parse_args() -> Result<Args, String> {
         pin: false,
         log: tracing::Level::INFO,
         ca_file: std::env::var_os("SSL_CERT_FILE").map(Into::into),
+        sim: None,
     };
+    let mut sim_cfg = sim::SimConfig::default();
+    let mut sim_on = false;
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         let mut val = || it.next().ok_or_else(|| format!("falta valor para {k}"));
@@ -94,6 +108,16 @@ fn parse_args() -> Result<Args, String> {
             "--pin" => a.pin = true,
             "--ca-file" => a.ca_file = Some(val()?.into()),
             "--log" => a.log = val()?.parse().map_err(|_| "--log inválido".to_string())?,
+            "--sim" => sim_on = true,
+            "--sim-seed" => sim_cfg.seed = val()?.parse().map_err(|_| "--sim-seed inválido")?,
+            "--chaos-drop" => sim_cfg.drop = prob(&val()?)?,
+            "--chaos-jitter-ms" => {
+                sim_cfg.jitter_ms = val()?.parse().map_err(|_| "--chaos-jitter-ms inválido")?
+            }
+            "--chaos-outage-s" => {
+                sim_cfg.outage_every_s = val()?.parse().map_err(|_| "--chaos-outage-s inválido")?
+            }
+            "--chaos-snapshot-fail" => sim_cfg.snapshot_fail = prob(&val()?)?,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -104,7 +128,15 @@ fn parse_args() -> Result<Args, String> {
     if a.markets.is_empty() {
         return Err("sin mercados".into());
     }
+    a.sim = sim_on.then_some(sim_cfg);
     Ok(a)
+}
+
+fn prob(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(p) if (0.0..=1.0).contains(&p) => Ok(p),
+        _ => Err(format!("probabilidad inválida: {s} (0..1)")),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -113,7 +145,7 @@ fn spawn_engine<R: SeqRule>(
     sync: SyncBook<R, engine::Obs>,
     rx: crossbeam_channel::Receiver<EngineMsg>,
     req: mpsc::UnboundedSender<()>,
-    view: Arc<ArcSwap<BookView>>,
+    views: Views,
     counters: Arc<IngestCounters>,
     rest: Arc<RestClient>,
     core: Option<core_affinity::CoreId>,
@@ -134,7 +166,8 @@ fn spawn_engine<R: SeqRule>(
                 sync,
                 rx,
                 req,
-                view,
+                views.book,
+                views.metrics,
                 counters,
                 rest,
                 EngineConfig::default(),
@@ -145,7 +178,10 @@ fn spawn_engine<R: SeqRule>(
 }
 
 fn aligner() -> engine::Obs {
-    Aligner::new(AlignerConfig::default(), FlowAgg::default())
+    Aligner::new(
+        AlignerConfig::default(),
+        (FlowAgg::default(), Metrics::new(MetricsConfig::default())),
+    )
 }
 
 #[cfg(unix)]
@@ -209,7 +245,7 @@ fn main() {
     } else {
         Vec::new()
     };
-    let mut registry: Vec<(String, Arc<ArcSwap<BookView>>)> = Vec::new();
+    let mut registry: Vec<(String, Views)> = Vec::new();
     let mut engines = Vec::new();
 
     for (i, kind) in args.markets.iter().copied().enumerate() {
@@ -220,9 +256,14 @@ fn main() {
         let label = ep.market.to_string();
         let (tx, rx) = crossbeam_channel::bounded::<EngineMsg>(65_536);
         let (req_tx, req_rx) = mpsc::unbounded_channel();
-        let view = Arc::new(ArcSwap::from_pointee(BookView::empty(label.clone())));
+        let mut views = Views::new(label.clone());
+        let sim_stats = args
+            .sim
+            .as_ref()
+            .map(|_| Arc::new(sim::SimStats::default()));
+        views.sim = sim_stats.clone();
         let counters = Arc::new(IngestCounters::default());
-        registry.push((kind.as_str().to_string(), view.clone()));
+        registry.push((kind.as_str().to_string(), views.clone()));
 
         let core = cores.get(1 + i).copied();
         let handle = match kind {
@@ -231,7 +272,7 @@ fn main() {
                 SyncBook::new(BinanceSpotRule, SyncConfig::default(), aligner()),
                 rx,
                 req_tx,
-                view,
+                views.clone(),
                 counters.clone(),
                 rest.clone(),
                 core,
@@ -241,13 +282,28 @@ fn main() {
                 SyncBook::new(BinanceFuturesRule, SyncConfig::default(), aligner()),
                 rx,
                 req_tx,
-                view,
+                views.clone(),
                 counters.clone(),
                 rest.clone(),
                 core,
             ),
         };
         engines.push((tx.clone(), handle));
+
+        if let (Some(cfg), Some(stats)) = (args.sim.clone(), sim_stats) {
+            rt.spawn(sim::run(
+                ep.market.clone(),
+                args.lines,
+                cfg,
+                tx.clone(),
+                counters.clone(),
+                req_rx,
+                views.clone(),
+                stats,
+                sd_rx.clone(),
+            ));
+            continue;
+        }
 
         for (lines, kind_s) in [
             (&ep.depth_lines, StreamKind::Depth),

@@ -438,21 +438,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "lu-metrics"
+version = "0.1.0"
+dependencies = [
+ "lu-book",
+ "lu-core",
+ "lu-flow",
+ "proptest",
+ "serde",
+]
+
+[[package]]
 name = "lu-node"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
  "core_affinity",
  "crossbeam-channel",
+ "futures-util",
  "lu-binance",
  "lu-book",
  "lu-core",
  "lu-flow",
+ "lu-metrics",
  "lu-telemetry",
  "rustls",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
 ]
