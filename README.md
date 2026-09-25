@@ -1,8 +1,9 @@
 # libro-unificado · lu-node
 
 Libros L2 exactos de Binance **spot y USDⓈ-M** (SOLUSDT) en RAM y en tiempo real,
-con líneas WebSocket redundantes, sincronización verificada por propiedades y
-observabilidad Prometheus. Fase F0+F1 del libro unificado multi-exchange.
+con líneas WebSocket redundantes, sincronización verificada por propiedades,
+alineador trades ↔ depth (F2) y observabilidad Prometheus. Fases F0+F1+F2 del libro
+unificado multi-exchange.
 Diseño completo: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Requisitos
@@ -15,8 +16,9 @@ Diseño completo: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 ## Compilar y verificar
 
 ```bash
-cargo test --workspace                                        # 31 tests
-PROPTEST_CASES=20000 cargo test -p lu-book --test prop_sync   # estrés de propiedades
+cargo test --workspace                                        # 36 tests
+PROPTEST_CASES=20000 cargo test -p lu-book --test prop_sync   # estrés de propiedades (libro)
+PROPTEST_CASES=20000 cargo test -p lu-flow --test prop_flow   # estrés de propiedades (F2)
 cargo clippy --workspace --all-targets -- -D warnings          # 0 advertencias
 cargo build --release -p lu-node                              # → target/release/lu-node
 ```
@@ -43,7 +45,7 @@ cargo build --release -p lu-node                              # → target/relea
 ```bash
 curl -s 127.0.0.1:9100/health        # estado por mercado
 curl -s 127.0.0.1:9100/ready         # 200 solo si todos los libros están Live; si no, 503
-curl -s 127.0.0.1:9100/book/spot     # vista completa (top 10, cobertura, líneas, latencias, trades)
+curl -s 127.0.0.1:9100/book/spot     # vista completa (top 10, cobertura, líneas, latencias, trades, flow F2)
 curl -s 127.0.0.1:9100/metrics       # Prometheus
 ```
 
@@ -57,6 +59,9 @@ Alarmas recomendadas:
 | `lu_ingest_dropped_total` | cualquier incremento (motor saturado) |
 | `lu_line_up{stream="depth"}` | todas las líneas de un mercado en 0 |
 | `lu_line_latency_ms{quantile="0.99"}` | sostenido sobre 250 ms |
+| `lu_flow_unaccounted` | distinto de 0 (defecto) |
+| `lu_flow_trades_total{state="late"}` | crece de forma sostenida (subir la marca de agua) |
+| `lu_flow_mirror_mismatch_total` | cualquier incremento (defecto) |
 
 ## Despliegue en Oracle Always Free (ARM Ampere)
 

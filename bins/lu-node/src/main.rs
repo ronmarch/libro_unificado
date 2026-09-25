@@ -9,15 +9,18 @@
 #![forbid(unsafe_code)]
 
 mod engine;
+mod flow;
 mod http;
 mod snapshot;
 mod view;
 
 use arc_swap::ArcSwap;
 use engine::{ChannelSink, Engine, EngineConfig, EngineMsg, IngestCounters, StreamKind};
+use flow::FlowAgg;
 use lu_binance::{run_line, Endpoints, FrameSink, LineSpec, RestClient};
 use lu_book::{BinanceFuturesRule, BinanceSpotRule, SeqRule, SyncBook, SyncConfig};
 use lu_core::{init_clock, MarketId, MarketKind};
+use lu_flow::{Aligner, AlignerConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -107,7 +110,7 @@ fn parse_args() -> Result<Args, String> {
 #[allow(clippy::too_many_arguments)]
 fn spawn_engine<R: SeqRule>(
     market: MarketId,
-    sync: SyncBook<R>,
+    sync: SyncBook<R, engine::Obs>,
     rx: crossbeam_channel::Receiver<EngineMsg>,
     req: mpsc::UnboundedSender<()>,
     view: Arc<ArcSwap<BookView>>,
@@ -139,6 +142,10 @@ fn spawn_engine<R: SeqRule>(
             .run();
         })
         .expect("no se pudo crear el hilo del motor")
+}
+
+fn aligner() -> engine::Obs {
+    Aligner::new(AlignerConfig::default(), FlowAgg::default())
 }
 
 #[cfg(unix)]
@@ -221,7 +228,7 @@ fn main() {
         let handle = match kind {
             MarketKind::Spot => spawn_engine(
                 ep.market.clone(),
-                SyncBook::new(BinanceSpotRule, SyncConfig::default(), ()),
+                SyncBook::new(BinanceSpotRule, SyncConfig::default(), aligner()),
                 rx,
                 req_tx,
                 view,
@@ -231,7 +238,7 @@ fn main() {
             ),
             MarketKind::Perp => spawn_engine(
                 ep.market.clone(),
-                SyncBook::new(BinanceFuturesRule, SyncConfig::default(), ()),
+                SyncBook::new(BinanceFuturesRule, SyncConfig::default(), aligner()),
                 rx,
                 req_tx,
                 view,

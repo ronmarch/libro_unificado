@@ -415,7 +415,7 @@ impl<R: SeqRule, O: BookObserver> SyncBook<R, O> {
             *c += 1;
         }
         st.applied += 1;
-        self.obs.on_diff_applied(d.first_id, d.last_id, ts);
+        self.obs.on_diff_applied(d);
         if self.book.is_crossed() {
             self.stats.crossed_seen += 1;
             if self.cfg.cross_policy == CrossPolicy::Resync {

@@ -2,6 +2,7 @@
 //! Sin locks en el camino crítico: entra por una cola acotada, sale por una
 //! vista inmutable (`ArcSwap`) que el servidor HTTP lee sin bloquear.
 
+use crate::flow::{FlowAgg, FlowView};
 use crate::view::{BookView, LevelView, LineView, TradeView};
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError};
@@ -11,6 +12,7 @@ use lu_core::{
     mono_now_ms, wall_now_ns, AggTrade, DepthDiff, DepthSnapshot, InstrumentSpec, MarketEvent,
     MarketId, Px,
 };
+use lu_flow::Aligner;
 use lu_telemetry::LatencyHist;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -170,10 +172,13 @@ impl Default for EngineConfig {
     }
 }
 
+/// Observador del libro en el nodo: alineador F2 con su resumen.
+pub type Obs = Aligner<FlowAgg>;
+
 /// Motor de un mercado.
 pub struct Engine<R: SeqRule> {
     label: String,
-    sync: SyncBook<R>,
+    sync: SyncBook<R, Obs>,
     rx: Receiver<EngineMsg>,
     snap_req: tokio::sync::mpsc::UnboundedSender<()>,
     view: Arc<ArcSwap<BookView>>,
@@ -194,7 +199,7 @@ impl<R: SeqRule> Engine<R> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         market: MarketId,
-        sync: SyncBook<R>,
+        sync: SyncBook<R, Obs>,
         rx: Receiver<EngineMsg>,
         snap_req: tokio::sync::mpsc::UnboundedSender<()>,
         view: Arc<ArcSwap<BookView>>,
@@ -312,6 +317,7 @@ impl<R: SeqRule> Engine<R> {
             self.trades.rpi_qty = self.trades.rpi_qty + r;
         }
         self.trades.last_px = Some(t.px);
+        self.sync.observer_mut().on_trade(&t);
     }
 
     fn after(&mut self, st: Step) {
@@ -406,6 +412,19 @@ impl<R: SeqRule> Engine<R> {
             sync: stats,
             lines,
             trades: self.trades.clone(),
+            flow: {
+                let al = self.sync.observer();
+                FlowView {
+                    stats: al.stats().clone(),
+                    unaccounted: al.unaccounted(),
+                    open_batches: al.open_batches(),
+                    buffered_trades: al.buffered_trades(),
+                    finalized_until_ms: al.finalized_until(),
+                    totals: al.sink().totals.clone(),
+                    last_batch: al.sink().last_batch,
+                    recent: al.sink().recent.iter().copied().collect(),
+                }
+            },
             ingest_dropped: self.counters.dropped.load(Ordering::Relaxed),
             parse_errors: self.counters.parse_errors.load(Ordering::Relaxed),
             rest_weight_1m: self.rest.used_weight_1m(),

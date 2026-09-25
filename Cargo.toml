@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/lu-core",
     "crates/lu-book",
+    "crates/lu-flow",
     "crates/lu-binance",
     "crates/lu-telemetry",
     "bins/lu-node",
@@ -17,6 +18,7 @@ publish = false
 # internos
 lu-core = { path = "crates/lu-core" }
 lu-book = { path = "crates/lu-book" }
+lu-flow = { path = "crates/lu-flow" }
 lu-binance = { path = "crates/lu-binance" }
 lu-telemetry = { path = "crates/lu-telemetry" }
 

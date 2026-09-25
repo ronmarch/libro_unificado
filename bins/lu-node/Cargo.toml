@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 lu-core.workspace = true
 lu-book.workspace = true
+lu-flow.workspace = true
 lu-binance.workspace = true
 lu-telemetry.workspace = true
 serde.workspace = true

@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f95035bcc60d567cb0b2870c5c78b67b17dcb1622f5746d85ae46d750bed5e62 # shrinks to init = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], specs = [BatchSpec { ops: [(1, Add { lvl: 6, q: 5 })], depth_delay: 0, list_untouched: false }, BatchSpec { ops: [(1, Exec { lvl: 6, q: 1, rpi: 0, delay: 0, jitter: 0 })], depth_delay: 0, list_untouched: false }, BatchSpec { ops: [], depth_delay: 0, list_untouched: false }, BatchSpec { ops: [], depth_delay: 0, list_untouched: false }, BatchSpec { ops: [], depth_delay: 0, list_untouched: false }], fut = false, slack = 1
+cc b853fc77da3153f1bff5564648c29af94aaae2e425ac174f6766295825a2195b # shrinks to init = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], specs = [BatchSpec { ops: [], depth_delay: 0, list_untouched: false }, BatchSpec { ops: [(1, Add { lvl: 7, q: 1 })], depth_delay: 0, list_untouched: false }, BatchSpec { ops: [(1, Exec { lvl: 7, q: 1, rpi: 0, delay: 0, jitter: 0 })], depth_delay: 0, list_untouched: false }, BatchSpec { ops: [], depth_delay: 0, list_untouched: false }, BatchSpec { ops: [], depth_delay: 0, list_untouched: false }], fut = false, slack = 1
+cc 998f4d7229ba83d4d27cc2d933400983714b421656f93696594cea4da0eca5d0 # shrinks to init = [0, 0, 0, 0, 0, 0, 1, 1, 0, 0], specs = [BatchSpec { ops: [(47, Exec { lvl: 7, q: 5, rpi: 0, delay: 0, jitter: 0 }), (1, Hidden { lvl: 7, q: 5, iceberg: true })], depth_delay: 0, list_untouched: false }, BatchSpec { ops: [(1, Exec { lvl: 6, q: 1, rpi: 0, delay: 0, jitter: 0 }), (1, Cancel { lvl: 7, pick: 0, q: 1 })], depth_delay: 0, list_untouched: false }], fut = false

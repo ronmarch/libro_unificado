@@ -11,6 +11,7 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 PROPTEST_CASES=20000 cargo test -p lu-book --test prop_sync
+PROPTEST_CASES=20000 cargo test -p lu-flow --test prop_flow
 ```
 
 ## Invariantes que no se rompen
@@ -23,22 +24,19 @@ PROPTEST_CASES=20000 cargo test -p lu-book --test prop_sync
 4. **`lu-book` es determinista**: sin E/S, sin relojes, sin hilos. El tiempo se inyecta.
 5. **Nunca bloquear el runtime**: cola llena ⇒ descartar y contar (`try_send`).
 6. `#![forbid(unsafe_code)]` en todo el código propio.
+8. **Conservación de trades** en `lu-flow`: `Aligner::unaccounted() == 0` siempre.
+9. Las cotas de F2 son **inferiores**: toda fórmula nueva requiere prueba contra el simulador.
 7. Un cambio de lógica en `lu-book` requiere una prueba que falle antes del cambio.
 
-## Próximo paso: F2 — alineador trades ↔ depth
+## Próximo paso: F3 — métricas
 
-* Entradas: `AggTrade` (px, qty, `nq`, agresor, `T`, `agg_id`) y cambios de nivel vía
-  `BookObserver::on_level(side, px, prev, new, exch_ts)`.
-* Marca de agua ~250 ms sobre tiempo del exchange (en futuros, trades y depth llegan por sockets
-  distintos: no asumir orden).
-* Por nivel y lote de 100 ms, con `e` = ejecutado, `q0` = cantidad antes, `q1` = después:
-  `no_visible_min = max(0, e − q0)`, `cancelado_min = max(0, q0 − e − q1)`.
-  Son **cotas inferiores**, nunca estimaciones puntuales.
-* Futuros: comparar depth contra `nq` (sin RPI); reportar `q − nq` aparte.
-* Verificación: simulador de matching sintético (icebergs, cancelaciones, recargas)
-  con propiedad "las cotas nunca exceden la verdad".
-* Al cambiar de época (`on_invalidate`/`on_rebuild`) las métricas en curso se marcan
-  contaminadas; no se mezclan épocas.
+F2 está hecho (`crates/lu-flow`, ver `ARCHITECTURE.md` §5 bis). F3 consume `LevelFlow`
+implementando `FlowSink` (se componen con tuplas `(A, B)`):
+
+* Velas footprint 15 m / 1 h / 4 h por nivel de 1 USDT: CVD del libro, TWA perezoso
+  `acc += qty_prev·Δt`, bid/ask ejecutado, `n_fills`, no visible, RPI aparte.
+* Persistencia foto ÷ TWA; muros retirados (parámetros confirmados abajo).
+* Solo lotes limpios (`clean`) alimentan cotas; `on_invalidate` contamina la vela en curso.
 
 ## Reglas de trabajo
 

@@ -1,6 +1,7 @@
 //! Vistas inmutables publicadas por cada motor (lectura sin locks vía `ArcSwap`)
 //! y su exposición en Prometheus.
 
+use crate::flow::FlowView;
 use lu_book::{Coverage, Phase, SyncStats, MAX_LINES};
 use lu_core::{Px, Qty};
 use lu_telemetry::{LatencySummary, MetricType, PromWriter};
@@ -111,6 +112,8 @@ pub struct BookView {
     pub lines: Vec<LineView>,
     /// Trades.
     pub trades: TradeView,
+    /// F2: flujos alineados trades ↔ depth.
+    pub flow: FlowView,
     /// Eventos descartados por cola llena (fail-safe: fuerzan hueco ⇒ resync).
     pub ingest_dropped: u64,
     /// Frames no parseables.
@@ -153,6 +156,7 @@ impl BookView {
                 })
                 .collect(),
             trades: TradeView::default(),
+            flow: FlowView::default(),
             ingest_dropped: 0,
             parse_errors: 0,
             rest_weight_1m: 0,
@@ -409,6 +413,82 @@ pub fn render_prometheus(views: &[Arc<BookView>]) -> String {
             &l,
             v.trades.dup as f64,
         );
+        let f = &v.flow;
+        for (state, n) in [
+            ("aligned", f.stats.aligned),
+            ("contaminated", f.stats.contaminated),
+            ("late", f.stats.late),
+            ("syncing", f.stats.syncing),
+            ("overflow", f.stats.overflow),
+            ("invalidated", f.stats.invalidated),
+            ("duplicate", f.stats.duplicate),
+        ] {
+            w.sample(
+                "lu_flow_trades_total",
+                "trades por destino en el alineador F2",
+                Counter,
+                &[("market", m), ("state", state)],
+                n as f64,
+            );
+        }
+        w.sample(
+            "lu_flow_unaccounted",
+            "conservación de trades del alineador (debe ser 0)",
+            Gauge,
+            &l,
+            f.unaccounted as f64,
+        );
+        w.sample(
+            "lu_flow_open_batches",
+            "lotes abiertos esperando marca de agua",
+            Gauge,
+            &l,
+            f.open_batches as f64,
+        );
+        w.sample(
+            "lu_flow_mirror_mismatch_total",
+            "espejo del alineador distinto del libro (debe ser 0)",
+            Counter,
+            &l,
+            f.stats.mirror_mismatch as f64,
+        );
+        for (side, nv, cm, ex) in [
+            (
+                "bid",
+                f.totals.no_visible_min_bid,
+                f.totals.cancelado_min_bid,
+                f.totals.exec_bid,
+            ),
+            (
+                "ask",
+                f.totals.no_visible_min_ask,
+                f.totals.cancelado_min_ask,
+                f.totals.exec_ask,
+            ),
+        ] {
+            let sl = [("market", m), ("side", side)];
+            w.sample(
+                "lu_flow_exec_total",
+                "ejecutado alineado (sin RPI)",
+                Counter,
+                &sl,
+                ex.to_f64_lossy(),
+            );
+            w.sample(
+                "lu_flow_no_visible_min_total",
+                "Σ cota inferior de ejecutado no visible",
+                Counter,
+                &sl,
+                nv.to_f64_lossy(),
+            );
+            w.sample(
+                "lu_flow_cancelado_min_total",
+                "Σ cota inferior de cancelado",
+                Counter,
+                &sl,
+                cm.to_f64_lossy(),
+            );
+        }
         w.sample(
             "lu_ingest_dropped_total",
             "eventos descartados por cola llena",

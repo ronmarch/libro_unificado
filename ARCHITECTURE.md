@@ -1,11 +1,11 @@
-# Libro Unificado — Arquitectura (F0 + F1)
+# Libro Unificado — Arquitectura (F0 + F1 + F2)
 
 Sistema **independiente de FORJA**. Mantiene en RAM, en tiempo real, libros L2
 exactos por venue y mercado, como base del libro unificado multi-exchange
 (Binance, OKX, Bybit, Coinbase, Kraken; spot y perpetuos). Sin almacenamiento:
 es un sistema de monitoreo, no de validación histórica.
 
-Estado: **F0 (fundaciones) y F1 (libro Binance spot + USDⓈ-M sincronizado) completas.**
+Estado: **F0 (fundaciones), F1 (libro Binance spot + USDⓈ-M sincronizado) y F2 (alineador trades ↔ depth) completas.**
 
 ---
 
@@ -29,12 +29,13 @@ Estado: **F0 (fundaciones) y F1 (libro Binance spot + USDⓈ-M sincronizado) com
 libro-unificado/
 ├── crates/lu-core       tipos: Px/Qty punto fijo, MarketId, eventos normalizados, relojes
 ├── crates/lu-book       L2Book + SyncBook (máquina de estados) + SeqRule + BookObserver
+├── crates/lu-flow       F2: alineador trades ↔ depth, cotas inferiores por nivel y lote
 ├── crates/lu-telemetry  histogramas HDR de latencia + escritor Prometheus
 ├── crates/lu-binance    conector: endpoints, parseo zero-copy, REST, líneas WS, TLS
 └── bins/lu-node         nodo: motores por mercado, snapshots, API HTTP
 ```
 
-Regla de dependencias: `lu-core` ← `lu-book` ← `lu-node`; `lu-core` ← `lu-binance` ← `lu-node`.
+Regla de dependencias: `lu-core` ← `lu-book` ← `lu-flow` ← `lu-node`; `lu-core` ← `lu-binance` ← `lu-node`.
 `lu-book` no conoce a ningún exchange concreto salvo por sus `SeqRule`.
 
 ---
@@ -106,6 +107,48 @@ Resultado: 31 tests (incluye 2 propiedades y 1 canario de vivacidad); estrés de
 
 ---
 
+## 5 bis. F2 — Alineador trades ↔ depth (`lu-flow`)
+
+El alineador es el `BookObserver` del `SyncBook` en cada motor; los trades
+(ya deduplicados A/B) entran por `Aligner::on_trade`. Determinista: tiempo del exchange.
+
+**Lote** = intervalo `(inicio, fin]` entre dos diffs aplicados. Tiempo del diff:
+`T` (futuros) o `E` (spot, no trae `T`). Diffs con el mismo tiempo se fusionan
+(se conserva el `q0` del primero). Por nivel y lote, con `e` = ejecutado sin RPI:
+
+| Salida | Fórmula | Es cota inferior de | Prueba |
+|---|---|---|---|
+| `no_visible_min` | `max(0, e_lo − q0)` | ejecutado que no estaba visible al inicio del lote (icebergs, ocultas, recargas) | de `q0` se consumió `c0 ≤ q0` |
+| `cancelado_min` | `max(0, q0 − e_hi − q1)` | cancelado en el lote | `q0 = c0 + k0 + s0`, `c0 ≤ e`, `s0 ≤ q1` |
+| `agregado_min` | `max(0, q1 − q0)` | agregado en el lote | balance del nivel |
+
+* **Incertidumbre temporal δ** (`boundary_slack_ms`, default 0 = especificación literal):
+  `e_lo` suma solo trades a más de δ de las fronteras; `e_hi` incluye los ambiguos de
+  ambos lotes vecinos. Las cotas siguen siendo válidas si `|T − tiempo real| ≤ δ`.
+* **Marca de agua**: un lote cierra cuando existe uno posterior y llegó un trade con
+  `E > fin + 2δ` (orden por socket), o el depth avanzó `fin + δ + 250 ms` (trades quietos).
+  Un trade cuyo lote ya cerró se cuenta `late` (no se re-emite).
+* **Épocas**: el primer lote tras un snapshot y todo lote abierto al perder la
+  sincronización son **contaminados**: `q0`/`q1` exactos, cotas en 0. Nunca se mezclan épocas.
+* **RPI**: `e` usa `nq`; `q − nq` se reporta aparte (`exec_rpi`).
+* **Conservación de trades**: `aligned + contaminated + late + syncing + overflow +
+  invalidated + duplicate + retenidos = recibidos` (`lu_flow_unaccounted` = 0).
+
+Verificación (`crates/lu-flow/tests/prop_flow.rs`) con un motor de matching sintético
+(FIFO con marca de lote por orden, icebergs que recargan, liquidez oscura, cancelaciones,
+RPI, socket de trades con latencia):
+
+| Propiedad | Contenido |
+|---|---|
+| F1 | cotas ≤ verdad; `q0`, `q1`, ejecutado y RPI exactos (δ = 0) |
+| F2 | cotas ≤ verdad con `T` desplazado hasta ±δ |
+| F3 | completitud: todo nivel con cambio o ejecución en lotes limpios se emite |
+| F4 | conservación en cada paso con resyncs, trades durante sync y tardíos |
+
+Prueba de mutación: invertir `e_lo`/`e_hi`, romper la resolución de `q0` o la fusión de
+diffs hace fallar las propiedades. Dos mutantes sobreviven por ser equivalentes bajo el
+modelo (margen `2δ` de la marca de agua; frontera de lote ya podada).
+
 ## 6. Hallazgos de la API de Binance (2025–2026) incorporados
 
 * **Futuros USDⓈ-M, WS dividido** desde 2026-03: `wss://fstream.binance.com/public/...`
@@ -155,7 +198,7 @@ La latencia depende de la ubicación del servidor; en la VM definitiva debe medi
 
 | Fase | Contenido |
 |---|---|
-| **F2** | Alineador trades ↔ depth con marca de agua (~250 ms). Por nivel consumido: `no_visible_min = max(0, e − q0)`, `cancelado_min = max(0, q0 − e − q1)`. |
+| ~~F2~~ | ✅ Alineador trades ↔ depth (§5 bis). Pendiente: medir en vivo `late`, `ambiguous` y calibrar δ. |
 | **F3** | Métricas vía `BookObserver`: velas footprint 15 m / 1 h / 4 h por nivel de 1 USDT (CVD del libro, TWA perezoso `acc += qty_prev·Δt`, bid/ask ejecutado, n_fills, no visible), persistencia foto ÷ TWA, táctica vs estructural, muros retirados, RPI aparte. |
 | **F4** | API WebSocket y UI. |
 | **F5** | Soak test de 72 h + caos (cortes de línea, latencia inyectada, 429). |
