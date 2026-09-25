@@ -1,0 +1,13 @@
+[package]
+name = "lu-book"
+description = "Libro L2 determinista: máquina de sincronización snapshot+diff con arbitraje de líneas A/B"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+lu-core.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "lu-core"
+description = "Tipos fundamentales: punto fijo exacto, instrumentos y eventos normalizados multi-venue"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true

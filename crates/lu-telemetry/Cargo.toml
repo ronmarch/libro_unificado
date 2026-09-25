@@ -1,0 +1,10 @@
+[package]
+name = "lu-telemetry"
+description = "Telemetría: histogramas HDR de latencia y exposición en formato Prometheus"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+hdrhistogram.workspace = true
+serde.workspace = true

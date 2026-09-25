@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lu-core",
+    "crates/lu-book",
+    "crates/lu-binance",
+    "crates/lu-telemetry",
+    "bins/lu-node",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+# internos
+lu-core = { path = "crates/lu-core" }
+lu-book = { path = "crates/lu-book" }
+lu-binance = { path = "crates/lu-binance" }
+lu-telemetry = { path = "crates/lu-telemetry" }
+
+# externos (superficie mínima, sin aws-lc/cmake: TLS con ring para cross-compilar aarch64-musl)
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal"] }
+tokio-tungstenite = { version = "0.27", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+ureq = { version = "2", default-features = false, features = ["tls"] }
+crossbeam-channel = "0.5"
+arc-swap = "1"
+hdrhistogram = { version = "7", default-features = false }
+core_affinity = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "std"] }
+proptest = { version = "1", default-features = false, features = ["std"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"          # fail-fast: systemd reinicia; nunca un proceso zombie a medias
+debug = "line-tables-only"
+
+[profile.test]
+opt-level = 1            # proptest más rápido sin perder símbolos
