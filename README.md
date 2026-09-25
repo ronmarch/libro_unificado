@@ -89,7 +89,9 @@ Cross-compilación hacia aarch64 no verificada en este entorno: compilar en la V
 
 Proyecto independiente de FORJA: usar un repositorio propio.
 
+Repositorio privado: [`ronmarch/libro_unificado`](https://github.com/ronmarch/libro_unificado).
+
 ```bash
-git init && git add . && git commit -m "F0+F1: libro Binance spot+USDM sincronizado"
-git remote add origin git@github.com:<usuario>/libro-unificado.git && git push -u origin main
+git clone git@github.com:ronmarch/libro_unificado.git     # SSH (Ubuntu)
+git clone https://github.com/ronmarch/libro_unificado.git # HTTPS (Windows)
 ```
