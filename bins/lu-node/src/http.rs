@@ -7,6 +7,7 @@
 //! * `/metrics` — Prometheus.
 //! * `/book/<spot|perp>` — vista JSON completa del mercado (incluye F2).
 //! * `/footprint/<spot|perp>` — F3: velas footprint en curso y cerradas, muros retirados.
+//! * `/cvd` — CVD del libro spot + perp (5 pares simétricos alrededor del precio).
 //! * `/ws?markets=spot,perp&interval_ms=250` — F4: flujo en vivo (ver `ws.rs`).
 //! * `/` y `/ui` — F4: interfaz web autocontenida.
 
@@ -185,6 +186,14 @@ fn route(path: &str, reg: &Registry) -> (u16, &'static str, String) {
             }
             None => (404, "text/plain", "mercado no registrado\n".into()),
         },
+        "/cvd" => match crate::cvd::compute(reg) {
+            Some(c) => (
+                200,
+                "application/json",
+                serde_json::to_string_pretty(&c).unwrap_or_default() + "\n",
+            ),
+            None => (503, "text/plain", "requiere spot y perp en vivo\n".into()),
+        },
         p if p.starts_with("/footprint/") => match find("/footprint/") {
             Some(v) => {
                 let body = serde_json::to_string(&*v.metrics.load_full()).unwrap_or_default();
@@ -195,7 +204,7 @@ fn route(path: &str, reg: &Registry) -> (u16, &'static str, String) {
         _ => (
             404,
             "text/plain",
-            "rutas: / /ui /ws /health /ready /metrics /book/<m> /footprint/<m>\n".into(),
+            "rutas: / /ui /ws /health /ready /metrics /cvd /book/<m> /footprint/<m>\n".into(),
         ),
     }
 }

@@ -6,8 +6,7 @@ exactos por venue y mercado, como base del libro unificado multi-exchange
 es un sistema de monitoreo, no de validación histórica.
 
 Estado: **F0 – F5 completas para Binance** (libro sincronizado, alineador F2, métricas F3,
-API WebSocket + UI F4, simulador con caos y soak F5). Pendiente: venues 2–5 y dos
-métricas de F3 sin definición (ver §9).
+API WebSocket + UI F4, simulador con caos y soak F5). Pendiente: venues 2–5.
 
 ---
 
@@ -177,11 +176,30 @@ modelo (margen `2δ` de la marca de agua; frontera de lote ya podada).
   lote; cada ventana se evalúa una vez, en el cruce; ventana con lote contaminado ⇒ rechazo.
   Contadores de rechazo por causa.
 
+* **Táctica vs estructural** (definición del usuario, 2026-09-25): por bucket y lado,
+  `R = TWA 15 m ÷ TWA 4 h` con la vela de 4 h **anterior ya cerrada** como referencia
+  (opción B: la vela contenedora acota R ≤ 16 y vale 1 en el primer bloque). Lectura:
+  R > 1 táctica (candidata a spoof si luego se retira), R < 1 desarmándose (alimenta el
+  detector de muros), R ≈ 1 con TWA 4 h alto estructural, R ≈ 1 sin él estable; sin
+  liquidez en la referencia y con liquidez ahora ⇒ táctica (R = ∞). Sin vela de referencia
+  ⇒ sin lectura. **Supuestos a confirmar**: "≈ 1" = 0,8 ≤ R ≤ 1,25; "TWA 4 h alto" = ≥ P90
+  del lado en la vela de referencia (`TacticalConfig`). No confundir con la persistencia
+  (foto ÷ TWA dentro de la misma vela).
+* **CVD del libro** (definición del usuario, 2026-09-25): con `m` = bucket del precio,
+  `Δk = (bid spot + bid perp)(m−k) − (ask spot + ask perp)(m+k)` para k = 1..5, y su
+  acumulado. Ejemplo: precio 101 ⇒ bids 100 vs asks 102, 99 vs 103… El bucket `m` no
+  participa. Foto actual del libro; un par que toca la zona fuera de cobertura de
+  cualquiera de los dos snapshots se marca incompleto. **Supuesto**: precio de referencia =
+  precio medio spot; ambos libros deben estar `Live`; se informa el desfase entre vistas.
+
 Verificación (`crates/lu-metrics/tests/prop_metrics.rs`): **M1** TWA, tiempo observado y
 Σ ejecutado de toda vela cerrada coinciden **exactamente** con una integración por fuerza
 bruta, con cortes y reconstrucciones aleatorias; **M2** siete escenarios del detector
 (dispara; rechazos por ejecución en el borde exacto de 20 %, distancia, percentil,
-contaminación; sin cruce de X no evalúa; caída gradual acumula ejecuciones de la ventana).
+contaminación; sin cruce de X no evalúa; caída gradual acumula ejecuciones de la ventana);
+**M3** los tres ejemplos del usuario (2000→2100 estructural R 1,05; 300→1500 táctica R 5;
+2000→600 desarmándose R 0,3), estable y referencia vacía; **M4** CVD con el esquema
+100/102, 99/103… y marca de incompleto fuera de cobertura.
 Mutaciones de área, pausa, reanudación, percentil y ventana hacen fallar las pruebas.
 
 ## 5 quater. F4 — API en vivo e interfaz
@@ -189,6 +207,7 @@ Mutaciones de área, pausa, reanudación, percentil y ventana hacen fallar las p
 * `GET /ws?markets=spot,perp&interval_ms=250`: `hello`, luego `book` (cada intervalo,
   100..5000 ms) y `footprint` (cuando cambia, ≤ 1 Hz). Máximo 16 sesiones; mensajes de
   entrada ≤ 64 KiB; un cliente que tarda > 2 s en recibir se desconecta (nunca frena al nodo).
+* `GET /cvd`: CVD del libro spot + perp (también por WebSocket, mensaje `cvd`).
 * `GET /footprint/<m>`: `MetricsView` (velas en curso, 12 cerradas por temporalidad, muros).
 * `GET /` o `/ui`: interfaz autocontenida (sin CDN): estado, escalera top 10, flujo F2,
   footprint por temporalidad alrededor del precio medio, muros retirados y líneas A/B.
@@ -262,7 +281,7 @@ La latencia depende de la ubicación del servidor; en la VM definitiva debe medi
 | Fase | Contenido |
 |---|---|
 | ~~F2~~ | ✅ Alineador trades ↔ depth (§5 bis). Pendiente: medir en vivo `late`, `ambiguous` y calibrar δ. |
-| ~~F3~~ | ✅ Velas footprint, TWA, persistencia, muros retirados (§5 ter). **Sin definir (no implementado):** "CVD del libro" y "táctica vs estructural". |
+| ~~F3~~ | ✅ Velas footprint, TWA, persistencia, muros retirados, táctica vs estructural y CVD del libro (§5 ter). |
 | ~~F4~~ | ✅ API WebSocket y UI (§5 quater). |
 | ~~F5~~ | ✅ Simulador, caos, soak y alertas (§5 quinquies). Pendiente: correr 72 h en la VM con Binance real. |
 | Venues 2–5 | OKX, Bybit, Coinbase, Kraken con la misma plantilla. SOLUSDC en modo sombra; SOLFDUSD excluido. |

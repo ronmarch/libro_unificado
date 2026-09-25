@@ -62,6 +62,10 @@ tr.mid td{border-top:1px dashed var(--line);border-bottom:1px dashed var(--line)
 .lines{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px}
 .line{border:1px solid var(--line);border-radius:8px;padding:8px;font-family:var(--mono);font-size:12px}
 .note{font-size:.78rem;color:var(--muted);margin-top:8px}
+.lq{display:inline-block;min-width:1.3em;text-align:center;border-radius:4px;font-weight:700;font-size:11px;margin-left:4px}
+.lq.estructural{background:var(--accent);color:var(--card)}.lq.tactica{background:var(--warn);color:var(--card)}
+.lq.desarmandose{background:var(--bad);color:var(--card)}.lq.estable{color:var(--muted)}
+.pos{color:var(--bid)}.neg{color:var(--ask)}
 </style>
 </head>
 <body>
@@ -81,9 +85,12 @@ tr.mid td{border-top:1px dashed var(--line);border-bottom:1px dashed var(--line)
   <section class="card c8"><h2>Footprint F3 <span class="muted" id="fpmeta" style="font-weight:400;font-size:.8rem"></span>
     <div class="seg" id="tf"><button data-i="0" class="active">15 m</button><button data-i="1">1 h</button><button data-i="2">4 h</button></div></h2>
     <div class="scroll"><table class="fp" id="fp"></table></div>
-    <div class="note">TWA = promedio ponderado por tiempo del bucket en la vela · Persist. = foto ÷ TWA · NV/Canc = Σ cotas inferiores F2 · Buckets de 1 USDT alrededor del precio medio.</div></section>
+    <div class="note">TWA = promedio ponderado por tiempo del bucket en la vela · Persist. = foto ÷ TWA · NV/Canc = Σ cotas inferiores F2 · R (solo 15 m) = TWA 15 m ÷ TWA de la vela 4 h anterior: <span class="lq estructural">E</span> estructural · <span class="lq tactica">T</span> táctica · <span class="lq desarmandose">D</span> desarmándose · Buckets de 1 USDT alrededor del precio medio.</div></section>
+  <section class="card c4"><h2>CVD del libro <span class="muted" id="cvdmeta" style="font-weight:400;font-size:.8rem"></span></h2>
+    <div class="scroll"><table id="cvd"></table></div>
+    <div class="note">Δk = (bid spot + bid perp)(m−k) − (ask spot + ask perp)(m+k), m = bucket del precio medio spot.</div></section>
   <section class="card c4"><h2>Muros retirados</h2><dl class="kv" id="wallstats"></dl><div class="scroll" style="margin-top:10px"><table id="walls"></table></div></section>
-  <section class="card c12"><h2>Líneas redundantes</h2><div class="lines" id="lines"></div></section>
+  <section class="card c8"><h2>Líneas redundantes</h2><div class="lines" id="lines"></div></section>
 </main>
 <script>
 (() => {
@@ -171,10 +178,20 @@ tr.mid td{border-top:1px dashed var(--line);border-bottom:1px dashed var(--line)
     const midB = isFinite(n(mid)) ? Math.floor(n(mid)) : null;
     let keys = Object.keys(by).map(Number).sort((a, b) => b - a);
     if (midB != null) keys = keys.filter(k => Math.abs(k - midB) <= 15);
-    const cell = (x, side) => x ? `<td class="${side === "bid" ? "b" : "a"}">${fmt(x.twa, 1)}</td><td>${fmt(x.qty, 1)}</td><td>${x.persistence == null ? "—" : x.persistence.toFixed(2)}</td><td>${fmt(x.exec, 2)}</td><td>${fmt(x.no_visible_min, 2)}</td><td>${fmt(x.cancelado_min, 2)}</td>` : `<td colspan="6" class="muted">·</td>`;
-    $("fp").innerHTML = keys.length ? `<tr><th>Bucket</th><th>TWA bid</th><th>Foto</th><th>Persist.</th><th>Ejec.</th><th>NV≥</th><th>Canc≥</th><th>TWA ask</th><th>Foto</th><th>Persist.</th><th>Ejec.</th><th>NV≥</th><th>Canc≥</th></tr>` +
+    const LQ = { estructural: "E", tactica: "T", desarmandose: "D", estable: "·" };
+    const rcell = x => x.liquidity ? `<td>${x.ratio == null ? "∞" : x.ratio.toFixed(2)}<span class="lq ${x.liquidity}" title="${x.liquidity}">${LQ[x.liquidity]}</span></td>` : `<td class="muted">—</td>`;
+    const cell = (x, side) => x ? `<td class="${side === "bid" ? "b" : "a"}">${fmt(x.twa, 1)}</td><td>${fmt(x.qty, 1)}</td><td>${x.persistence == null ? "—" : x.persistence.toFixed(2)}</td>${rcell(x)}<td>${fmt(x.exec, 2)}</td><td>${fmt(x.no_visible_min, 2)}</td><td>${fmt(x.cancelado_min, 2)}</td>` : `<td colspan="7" class="muted">·</td>`;
+    $("fp").innerHTML = keys.length ? `<tr><th>Bucket</th><th>TWA bid</th><th>Foto</th><th>Persist.</th><th>R</th><th>Ejec.</th><th>NV≥</th><th>Canc≥</th><th>TWA ask</th><th>Foto</th><th>Persist.</th><th>R</th><th>Ejec.</th><th>NV≥</th><th>Canc≥</th></tr>` +
       keys.map(k => `<tr class="${k === midB ? "midrow" : ""}"><td>${k}</td>${cell(by[k].bid, "bid")}${cell(by[k].ask, "ask")}</tr>`).join("")
       : `<tr><td class="empty">sin celdas</td></tr>`;
+  }
+
+  function renderCvd(c) {
+    if (!c) { $("cvd").innerHTML = `<tr><td class="empty">requiere spot y perp en vivo</td></tr>`; $("cvdmeta").textContent = ""; return; }
+    $("cvdmeta").textContent = `m = ${c.ref_bucket} · total ${fmt(c.total, 1)}${c.complete ? "" : " · incompleto"} · desfase ${c.skew_ms} ms`;
+    const sg = v => `<span class="${n(v) >= 0 ? "pos" : "neg"}">${fmt(v, 1)}</span>`;
+    $("cvd").innerHTML = `<tr><th>k</th><th>Bid</th><th>Σ bids</th><th>Ask</th><th>Σ asks</th><th>Δ</th><th>Acum.</th></tr>` +
+      c.levels.map(l => `<tr class="${l.complete ? "" : "muted"}"><td>${l.k}</td><td>${l.bid_bucket}</td><td class="bid">${fmt(n(l.bid_spot) + n(l.bid_perp), 1)}</td><td>${l.ask_bucket}</td><td class="ask">${fmt(n(l.ask_spot) + n(l.ask_perp), 1)}</td><td>${sg(l.delta)}</td><td>${sg(l.cum)}</td></tr>`).join("");
   }
 
   function renderWalls(m) {
@@ -197,6 +214,7 @@ tr.mid td{border-top:1px dashed var(--line);border-bottom:1px dashed var(--line)
       if (b) renderBook(b);
       renderFootprint(state.fp[state.sel], b && b.mid);
       renderWalls(state.fp[state.sel]);
+      renderCvd(state.cvd);
       $("clock").textContent = b ? "exchange " + time(b.exch_ts_ms) + " UTC" : "";
     }
     requestAnimationFrame(frame);
@@ -214,6 +232,7 @@ tr.mid td{border-top:1px dashed var(--line);border-bottom:1px dashed var(--line)
       if (m.type === "hello") { state.markets = m.markets; if (!state.sel || !m.markets.includes(state.sel)) state.sel = m.markets[0]; tabs(); }
       else if (m.type === "book") state.book[m.key] = m.data;
       else if (m.type === "footprint") state.fp[m.key] = m.data;
+      else if (m.type === "cvd") state.cvd = m.data;
       state.dirty = true;
     };
   }

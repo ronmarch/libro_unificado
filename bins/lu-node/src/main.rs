@@ -8,6 +8,7 @@
 //! Flujo: línea A/B → cola acotada → motor (SyncBook) → vista inmutable → HTTP.
 #![forbid(unsafe_code)]
 
+mod cvd;
 mod engine;
 mod flow;
 mod http;

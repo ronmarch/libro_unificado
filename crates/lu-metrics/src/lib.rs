@@ -7,9 +7,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod cvd;
 pub mod footprint;
 
+pub use cvd::{book_cvd, BookCvd, CvdLevel};
 pub use footprint::{
-    CandleView, CellView, Metrics, MetricsConfig, MetricsView, WallConfig, WallRetired, WallStats,
-    TF_15M, TF_1H, TF_4H,
+    CandleView, CellView, Liquidity, Metrics, MetricsConfig, MetricsView, TacticalConfig,
+    WallConfig, WallRetired, WallStats, TF_15M, TF_1H, TF_4H,
 };

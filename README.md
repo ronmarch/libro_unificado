@@ -17,7 +17,7 @@ Diseño completo: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 ## Compilar y verificar
 
 ```bash
-cargo test --workspace                                              # 47 tests
+cargo test --workspace                                              # 54 tests
 PROPTEST_CASES=20000 cargo test -p lu-book --test prop_sync         # estrés (libro)
 PROPTEST_CASES=20000 cargo test -p lu-flow --test prop_flow         # estrés (F2)
 PROPTEST_CASES=20000 cargo test -p lu-metrics --test prop_metrics   # estrés (F3)
@@ -63,7 +63,8 @@ curl -s 127.0.0.1:9100/health        # estado por mercado
 curl -s 127.0.0.1:9100/ready         # 200 solo si todos los libros están Live; si no, 503
 curl -s 127.0.0.1:9100/book/spot     # vista completa (top 10, cobertura, líneas, latencias, trades, flow F2)
 curl -s 127.0.0.1:9100/metrics       # Prometheus
-curl -s 127.0.0.1:9100/footprint/perp  # F3: velas 15m/1h/4h por bucket, muros retirados
+curl -s 127.0.0.1:9100/footprint/perp  # F3: velas 15m/1h/4h por bucket, R táctica/estructural, muros
+curl -s 127.0.0.1:9100/cvd             # F3: CVD del libro spot + perp (5 pares)
 # Interfaz: http://127.0.0.1:9100/  ·  WebSocket: ws://127.0.0.1:9100/ws?markets=spot,perp&interval_ms=250
 ```
 

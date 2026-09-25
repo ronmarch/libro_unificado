@@ -65,6 +65,56 @@ impl Default for WallConfig {
     }
 }
 
+/// Parámetros de táctica vs estructural (R = TWA corto ÷ TWA largo de referencia).
+///
+/// Definición del usuario (2026-09-25): R = TWA 15 m ÷ TWA 4 h del mismo bucket y lado;
+/// referencia = vela de 4 h ANTERIOR ya cerrada (opción B), no la que contiene a la de
+/// 15 m (que acota R a ≤ 16 y vale 1 en el primer bloque).
+///
+/// Supuestos declarados (no especificados; confirmar):
+/// * "R ≈ 1" = `approx_low_pct/100 ≤ R ≤ approx_high_pct/100` (80 % – 125 %).
+/// * "TWA 4 h alto" = ≥ percentil `high_percentile` (90, como el detector de muros) de
+///   los TWA de la vela de referencia, mismo lado, dentro de la cobertura.
+#[derive(Debug, Clone)]
+pub struct TacticalConfig {
+    /// Temporalidad corta (15 m).
+    pub short_tf_ms: u64,
+    /// Temporalidad larga de referencia (4 h).
+    pub long_tf_ms: u64,
+    /// Límite inferior de "R ≈ 1", en %.
+    pub approx_low_pct: u32,
+    /// Límite superior de "R ≈ 1", en %.
+    pub approx_high_pct: u32,
+    /// Percentil que define "TWA 4 h alto".
+    pub high_percentile: u32,
+}
+
+impl Default for TacticalConfig {
+    fn default() -> Self {
+        Self {
+            short_tf_ms: TF_15M,
+            long_tf_ms: TF_4H,
+            approx_low_pct: 80,
+            approx_high_pct: 125,
+            high_percentile: 90,
+        }
+    }
+}
+
+/// Lectura de táctica vs estructural.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Liquidity {
+    /// R ≈ 1 con TWA 4 h alto: el tamaño lleva horas ahí.
+    Estructural,
+    /// R ≈ 1 sin TWA 4 h alto: estable pero no relevante.
+    Estable,
+    /// R > 1 (o sin liquidez en la referencia): alguien lo puso hace poco; candidata a spoof si se retira.
+    Tactica,
+    /// R < 1: había tamaño y se está yendo.
+    Desarmandose,
+}
+
 /// Parámetros de F3.
 #[derive(Debug, Clone)]
 pub struct MetricsConfig {
@@ -80,6 +130,8 @@ pub struct MetricsConfig {
     pub keep_walls: usize,
     /// Detector.
     pub wall: WallConfig,
+    /// Táctica vs estructural.
+    pub tactical: TacticalConfig,
 }
 
 impl Default for MetricsConfig {
@@ -91,6 +143,7 @@ impl Default for MetricsConfig {
             keep_closed: 96,
             keep_walls: 500,
             wall: WallConfig::default(),
+            tactical: TacticalConfig::default(),
         }
     }
 }
@@ -226,6 +279,12 @@ pub struct CellView {
     pub agregado_min: Qty,
     /// Bucket parcialmente fuera de la cobertura del snapshot.
     pub partial: bool,
+    /// Solo velas de 15 m: TWA del mismo bucket en la vela de 4 h anterior cerrada.
+    pub twa_ref: Option<Qty>,
+    /// Solo velas de 15 m: R = TWA ÷ `twa_ref` (presentación; `None` si la referencia es 0).
+    pub ratio: Option<f64>,
+    /// Solo velas de 15 m: lectura táctica vs estructural.
+    pub liquidity: Option<Liquidity>,
 }
 
 /// Vela para presentación.
@@ -247,6 +306,8 @@ pub struct CandleView {
     pub sell_exec: Qty,
     /// Delta de trades = compra − venta agresiva.
     pub delta: Qty,
+    /// Solo velas de 15 m: inicio de la vela de 4 h de referencia (`None` = aún no existe).
+    pub ref_start_ms: Option<u64>,
     /// Celdas ordenadas por lado y bucket.
     pub cells: Vec<CellView>,
 }
@@ -264,6 +325,10 @@ pub struct MetricsView {
     pub walls: Vec<WallRetired>,
     /// Contadores del detector.
     pub wall_stats: WallStats,
+    /// Bids por debajo de este bucket (inclusive) son desconocidos (snapshot truncado).
+    pub bid_floor_bucket: Option<i64>,
+    /// Asks por encima de este bucket (inclusive) son desconocidos.
+    pub ask_ceiling_bucket: Option<i64>,
 }
 
 /// Motor de métricas F3.
@@ -711,9 +776,66 @@ impl Metrics {
         self.walls.push_back(ev);
     }
 
+    /// TWA por celda de una vela cerrada, y umbral de percentil por lado.
+    fn reference(&self, start: u64) -> Option<(BTreeMap<Key, i64>, [i64; 2])> {
+        let tc = &self.cfg.tactical;
+        let li = self
+            .cfg
+            .timeframes_ms
+            .iter()
+            .position(|&t| t == tc.long_tf_ms)?;
+        let c = self.closed[li].iter().find(|c| c.start == start)?;
+        if c.observed == 0 {
+            return None;
+        }
+        let obs = i128::from(c.observed);
+        let twa: BTreeMap<Key, i64> = c
+            .cells
+            .iter()
+            .map(|(k, cell)| (*k, (cell.acc / obs) as i64))
+            .collect();
+        let mut thr = [i64::MAX; 2];
+        for (i, side) in [Side::Bid, Side::Ask].into_iter().enumerate() {
+            let mut v: Vec<i64> = twa
+                .iter()
+                .filter(|((s, b), _)| *s == side && !self.is_partial(*s, *b))
+                .map(|(_, t)| *t)
+                .collect();
+            if v.is_empty() {
+                continue;
+            }
+            v.sort_unstable();
+            let rank = (v.len() * tc.high_percentile as usize).div_ceil(100).max(1);
+            thr[i] = v[rank - 1];
+        }
+        Some((twa, thr))
+    }
+
+    fn classify(&self, side: Side, twa: i64, ref_twa: i64, thr: &[i64; 2]) -> Option<Liquidity> {
+        let tc = &self.cfg.tactical;
+        if ref_twa <= 0 {
+            return (twa > 0).then_some(Liquidity::Tactica);
+        }
+        let (t, r) = (i128::from(twa) * 100, i128::from(ref_twa));
+        Some(if t > i128::from(tc.approx_high_pct) * r {
+            Liquidity::Tactica
+        } else if t < i128::from(tc.approx_low_pct) * r {
+            Liquidity::Desarmandose
+        } else if ref_twa >= thr[si(side)] {
+            Liquidity::Estructural
+        } else {
+            Liquidity::Estable
+        })
+    }
+
     fn candle_view(&self, c: &Candle, at: u64) -> CandleView {
         let live = c.live_since.is_some();
         let obs = c.observed_at(at);
+        let tc = &self.cfg.tactical;
+        let ref_start = (c.tf == tc.short_tf_ms)
+            .then(|| (c.start / tc.long_tf_ms * tc.long_tf_ms).checked_sub(tc.long_tf_ms))
+            .flatten();
+        let reference = ref_start.and_then(|s| self.reference(s));
         let (mut buy, mut sell) = (0i64, 0i64);
         let cells = c
             .cells
@@ -744,6 +866,16 @@ impl Metrics {
                     cancelado_min: Qty::from_raw(cell.cm),
                     agregado_min: Qty::from_raw(cell.am),
                     partial: self.is_partial(side, b),
+                    twa_ref: reference
+                        .as_ref()
+                        .map(|(m, _)| Qty::from_raw(m.get(&(side, b)).copied().unwrap_or(0))),
+                    ratio: reference.as_ref().and_then(|(m, _)| {
+                        let r = m.get(&(side, b)).copied().unwrap_or(0);
+                        (r > 0).then(|| twa as f64 / r as f64)
+                    }),
+                    liquidity: reference.as_ref().and_then(|(m, thr)| {
+                        self.classify(side, twa, m.get(&(side, b)).copied().unwrap_or(0), thr)
+                    }),
                 }
             })
             .collect();
@@ -756,6 +888,7 @@ impl Metrics {
             buy_exec: Qty::from_raw(buy),
             sell_exec: Qty::from_raw(sell),
             delta: Qty::from_raw(buy - sell),
+            ref_start_ms: reference.as_ref().and(ref_start),
             cells,
         }
     }
@@ -783,6 +916,8 @@ impl Metrics {
                 .collect(),
             walls: self.walls.iter().copied().collect(),
             wall_stats: self.wall_stats.clone(),
+            bid_floor_bucket: self.floor_bucket,
+            ask_ceiling_bucket: self.ceiling_bucket,
         }
     }
 }

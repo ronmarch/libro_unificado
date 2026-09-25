@@ -6,6 +6,7 @@
 //! * `{"type":"hello","markets":[...],"interval_ms":250}`
 //! * `{"type":"book","key":"spot","data":<BookView>}` cada `interval_ms` (100..=5000)
 //! * `{"type":"footprint","key":"spot","data":<MetricsView>}` cuando cambia (≤ 1 Hz)
+//! * `{"type":"cvd","data":<BookCvd>}` cuando cambia (requiere spot y perp en vivo)
 //!
 //! Cliente → servidor: se ignora (ping/pong los resuelve la biblioteca; `Close` cierra).
 //! Un cliente lento (envío > 2 s) se desconecta: nunca frena al nodo.
@@ -81,6 +82,7 @@ pub async fn session(
         return Ok(());
     }
     let mut last_fp: Vec<Option<Arc<lu_metrics::MetricsView>>> = vec![None; markets.len()];
+    let mut last_cvd = String::new();
     let mut tick = tokio::time::interval(Duration::from_millis(interval_ms));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -103,6 +105,15 @@ pub async fn session(
                             return Ok(());
                         }
                         last_fp[i] = Some(fp);
+                    }
+                }
+                if let Some(c) = crate::cvd::compute(&reg) {
+                    let body = serde_json::to_string(&c).unwrap_or_default();
+                    if body != last_cvd {
+                        if !send(&mut tx, format!(r#"{{"type":"cvd","data":{body}}}"#)).await {
+                            return Ok(());
+                        }
+                        last_cvd = body;
                     }
                 }
             }

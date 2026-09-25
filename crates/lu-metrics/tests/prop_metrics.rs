@@ -352,3 +352,158 @@ fn m2_caida_gradual_acumula_ejecuciones_de_la_ventana() {
     let s = m.wall_stats();
     assert_eq!((s.evaluated, s.fired, s.rejected_exec), (1, 0, 1), "{s:?}");
 }
+
+// ------------------------------------------------------------------- M3: táctica vs estructural
+
+/// Vela 4 h completa con el bucket 120 (bid) en `ref_qty` y 115..119 en `others`;
+/// en la vela 4 h siguiente, el bucket 120 pasa a `now_qty` al inicio del primer bloque de 15 m.
+fn tactical(ref_qty: i64, others: i64, now_qty: i64) -> lu_metrics::CellView {
+    let mut lv: Vec<(Side, i64, i64)> = (115..=119)
+        .map(|b| (Side::Bid, b * 100 + 50, others))
+        .collect();
+    lv.push((Side::Bid, 12050, ref_qty));
+    lv.push((Side::Ask, 12150, 10));
+    let mut m = Metrics::new(MetricsConfig::default());
+    m.on_rebuild(1, &book(&lv));
+    batch(&mut m, T0, &[], false);
+    // Antes de la vela de referencia completa: sin lectura.
+    batch(&mut m, T0 + 1_000, &[], true);
+    let v = m.view(0);
+    assert_eq!(v.current[0].ref_start_ms, None);
+    assert!(v.current[0].cells.iter().all(|c| c.liquidity.is_none()));
+    for k in 1..=144 {
+        batch(&mut m, T0 + k * 100_000, &[], true);
+    }
+    let t = T0 + TF_4H;
+    batch(
+        &mut m,
+        t,
+        &[flow(Side::Bid, 12050, ref_qty, now_qty, 0, t, true)],
+        true,
+    );
+    batch(&mut m, t + 300_000, &[], true);
+    let v = m.view(0);
+    let c = &v.current[0];
+    assert_eq!(c.tf_ms, TF_15M);
+    assert_eq!(
+        c.ref_start_ms,
+        Some(T0),
+        "referencia = vela 4 h anterior cerrada (opción B)"
+    );
+    c.cells
+        .iter()
+        .find(|x| x.side == Side::Bid && x.bucket == 120)
+        .cloned()
+        .unwrap()
+}
+
+#[test]
+fn m3_estructural_2000_a_2100() {
+    let c = tactical(2000, 10, 2100);
+    assert_eq!(c.twa_ref, Some(Qty::from_units(2000)));
+    assert!((c.ratio.unwrap() - 1.05).abs() < 1e-9);
+    assert_eq!(c.liquidity, Some(lu_metrics::Liquidity::Estructural));
+}
+
+#[test]
+fn m3_tactica_300_a_1500() {
+    let c = tactical(300, 10, 1500);
+    assert!((c.ratio.unwrap() - 5.0).abs() < 1e-9);
+    assert_eq!(c.liquidity, Some(lu_metrics::Liquidity::Tactica));
+}
+
+#[test]
+fn m3_desarmandose_2000_a_600() {
+    let c = tactical(2000, 10, 600);
+    assert!((c.ratio.unwrap() - 0.3).abs() < 1e-9);
+    assert_eq!(c.liquidity, Some(lu_metrics::Liquidity::Desarmandose));
+}
+
+#[test]
+fn m3_r_cercano_a_1_sin_tamano_relevante_es_estable() {
+    let c = tactical(2000, 5000, 2100); // otros buckets más grandes: 2000 no alcanza P90
+    assert_eq!(c.liquidity, Some(lu_metrics::Liquidity::Estable));
+}
+
+#[test]
+fn m3_sin_liquidez_en_la_referencia_es_tactica() {
+    let c = tactical(0, 10, 1500);
+    assert_eq!(c.ratio, None);
+    assert_eq!(c.liquidity, Some(lu_metrics::Liquidity::Tactica));
+}
+
+// ------------------------------------------------------------------- M4: CVD del libro
+
+fn view_of(levels: &[(Side, i64, i64)], limit: usize) -> lu_metrics::MetricsView {
+    let mut bids = Vec::new();
+    let mut asks = Vec::new();
+    for &(s, c, q) in levels {
+        let l = Level {
+            px: px(c),
+            qty: Qty::from_units(q),
+        };
+        match s {
+            Side::Bid => bids.push(l),
+            Side::Ask => asks.push(l),
+        }
+    }
+    let mut b = L2Book::new();
+    b.load_snapshot(&DepthSnapshot {
+        last_update_id: 1,
+        limit,
+        bids,
+        asks,
+        exch_ts_ms: None,
+        rx: RxStamp::default(),
+    });
+    let mut m = Metrics::new(MetricsConfig::default());
+    m.on_rebuild(1, &b);
+    batch(&mut m, T0 + 5, &[], false);
+    m.view(0)
+}
+
+#[test]
+fn m4_cvd_del_libro_pares_simetricos() {
+    // precio 101,30 ⇒ m = 101: k=1 bids 100 vs asks 102; k=2 bids 99 vs asks 103.
+    let spot = view_of(
+        &[
+            (Side::Bid, 10050, 10),
+            (Side::Bid, 9950, 20),
+            (Side::Bid, 10120, 999), // bucket m: no participa
+            (Side::Ask, 10250, 5),
+            (Side::Ask, 10350, 7),
+        ],
+        5000,
+    );
+    let perp = view_of(&[(Side::Bid, 10020, 3), (Side::Ask, 10270, 4)], 5000);
+    let c = lu_metrics::book_cvd(&spot, &perp, px(10130), Px::from_units(1), 5);
+    assert_eq!(c.ref_bucket, 101);
+    assert_eq!(c.levels.len(), 5);
+    let l1 = c.levels[0];
+    assert_eq!((l1.bid_bucket, l1.ask_bucket), (100, 102));
+    assert_eq!(l1.delta, Qty::from_units(10 + 3 - 5 - 4));
+    assert_eq!(c.levels[1].delta, Qty::from_units(20 - 7));
+    assert_eq!(c.levels[1].cum, Qty::from_units(17));
+    assert_eq!(c.levels[4].bid_bucket, 96);
+    assert_eq!(c.levels[4].ask_bucket, 106);
+    assert_eq!(c.total, Qty::from_units(17));
+    assert!(c.complete);
+}
+
+#[test]
+fn m4_cvd_marca_incompleto_fuera_de_cobertura() {
+    // Snapshot spot truncado (limit = 2 bids) ⇒ bids bajo 99 desconocidos.
+    let spot = view_of(
+        &[
+            (Side::Bid, 10050, 10),
+            (Side::Bid, 9950, 20),
+            (Side::Ask, 10250, 5),
+        ],
+        2,
+    );
+    let perp = view_of(&[(Side::Bid, 10020, 3), (Side::Ask, 10270, 4)], 5000);
+    let c = lu_metrics::book_cvd(&spot, &perp, px(10130), Px::from_units(1), 5);
+    assert!(c.levels[0].complete, "100 está sobre el piso");
+    assert!(!c.levels[1].complete, "99 contiene el piso de cobertura");
+    assert!(!c.complete);
+}
