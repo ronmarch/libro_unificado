@@ -19,6 +19,7 @@ futures-util.workspace = true
 lu-binance.workspace = true
 lu-net.workspace = true
 lu-okx.workspace = true
+lu-coinbase.workspace = true
 lu-telemetry.workspace = true
 serde.workspace = true
 serde_json.workspace = true

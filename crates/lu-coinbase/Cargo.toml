@@ -1,0 +1,13 @@
+[package]
+name = "lu-coinbase"
+description = "Conector Coinbase Advanced Trade (spot): level2 completo con secuencia por conexión, market_trades"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+lu-core.workspace = true
+lu-net.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

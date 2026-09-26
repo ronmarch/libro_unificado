@@ -33,7 +33,7 @@ PROPTEST_CASES=20000 cargo test -p lu-metrics --test prop_metrics
 
 F0–F5 hechas para Binance (ver `ARCHITECTURE.md` §5 bis – §5 quinquies). Pendiente:
 
-1. **Venues restantes** (Bybit, Coinbase, Kraken): seguir la plantilla de `crates/lu-okx`
+1. **Venues restantes** (Bybit, Kraken): seguir la plantilla de `crates/lu-okx`
    (`Protocol` de `lu-net` + `SeqRule` + `MarketEvent::Snapshot`). Capturar mensajes reales
    antes de escribir el parser; verificar contra snapshots independientes (ver §6 bis).
    Kraken valida con CRC32 (activo): falta soporte de checksum en `SyncBook`.

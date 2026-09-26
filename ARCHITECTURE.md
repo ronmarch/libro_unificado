@@ -6,8 +6,8 @@ exactos por venue y mercado, como base del libro unificado multi-exchange
 es un sistema de monitoreo, no de validación histórica.
 
 Estado: **F0 – F5 completas para Binance** (libro sincronizado, alineador F2, métricas F3,
-API WebSocket + UI F4, simulador con caos y soak F5). **OKX** integrado y verificado en vivo (§6 bis).
-Pendiente: Bybit, Coinbase, Kraken.
+API WebSocket + UI F4, simulador con caos y soak F5). **OKX** y **Coinbase** integrados y verificados en vivo
+(§6 bis, §6 ter). Pendiente: Bybit, Kraken.
 
 ---
 
@@ -37,6 +37,7 @@ libro-unificado/
 ├── crates/lu-net        TLS y líneas WebSocket redundantes genéricas por `Protocol`
 ├── crates/lu-binance    conector Binance: endpoints, parseo zero-copy, REST
 ├── crates/lu-okx        conector OKX v5: books top-400 (snapshot por WS), trades, ctVal
+├── crates/lu-coinbase   conector Coinbase Advanced Trade: level2 completo, secuencia por conexión
 └── bins/lu-node         nodo: motores, snapshots, API HTTP + WebSocket + UI, simulador y caos
 ```
 
@@ -276,6 +277,27 @@ fue **idéntico en 57/57**.
 
 Multi-venue: `--venues binance,okx` (rutas `binance.spot`, `okx.perp`, …). El CVD del libro
 suma spot y perp de todos los venues en vivo (libro unificado).
+
+## 6 ter. Coinbase Advanced Trade (`lu-coinbase`) — verificado en vivo 2026-09-26
+
+Hallazgos (capturados): el feed Exchange sin autenticar degrada `level2` a **top 50 sin
+secuencia** ⇒ descartado. Advanced Trade (`level2`) entrega el libro **completo** (~13 000
+niveles, bids hasta 0,01) y `sequence_num` **por conexión**, contiguo y compartido por todos
+los canales. En `market_trades`, `side` es el lado del **maker** (43/43 `trade_id` idénticos
+al feed Exchange) ⇒ agresor = opuesto. Coinbase no tiene perpetuos en este exchange.
+
+* Cada conexión valida su propia continuidad; ante un hueco deja de emitir profundidad y
+  pide re-suscripción (`Protocol::take_resync`). La profundidad usa un contador sintético
+  contiguo por línea que nunca retrocede (regla `OkxRule`, encadenada por `prev`).
+* Sin arbitraje A/B de profundidad (ids no comparables entre conexiones): la línea 0 alimenta
+  el libro; las demás aportan trades (deduplicados por `trade_id`). Límite declarado.
+* **Supuesto declarado**: producto SOL-USD (SOL-USDT tiene ~0,6 % de su volumen); en el libro
+  unificado se suma con los libros en USDT tratando 1 USD = 1 USDT (`--coinbase-product`).
+
+Prueba en vivo (5 min): 0 resyncs, 0 sin contabilizar, 0 tardíos, 0 errores; 181 trades
+alineados (línea A primero 82, B 99). **Verificación independiente**: una conexión aparte
+reconstruyó su propio libro; en los 141 instantes de exchange comunes, el top 10 fue
+**idéntico en 141/141**. Con `--venues binance,okx,coinbase` el CVD suma los 4 mercados vivos.
 
 ## 7. Prueba en vivo (2026-09-25, binario release, servidor con 451 en `api` y `fapi`)
 

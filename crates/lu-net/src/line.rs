@@ -43,6 +43,11 @@ pub trait Protocol: Send + Sync + 'static {
     }
     /// Parsea un frame de texto y agrega 0..n eventos a `out`.
     fn parse(&self, text: &str, rx: RxStamp, out: &mut Vec<MarketEvent>) -> Result<(), String>;
+    /// El protocolo detectó que el estado de ESTA conexión es inválido (p. ej. hueco en
+    /// la secuencia por conexión) y pide un snapshot nuevo. Se consulta tras cada frame.
+    fn take_resync(&self) -> bool {
+        false
+    }
 }
 
 /// Órdenes a una línea en marcha.
@@ -216,6 +221,21 @@ pub async fn run_line(
                                             }
                                         }
                                         Err(e) => sink.parse_error(spec.line, &e),
+                                    }
+                                    if proto.take_resync() {
+                                        match proto.resubscribe() {
+                                            Some(msgs) => {
+                                                tracing::warn!(line = spec.line, label = %spec.label, "hueco en la secuencia de la conexión: re-suscripción");
+                                                let mut ok = true;
+                                                for m in msgs {
+                                                    ok &= tx.send(Message::text(m)).await.is_ok();
+                                                }
+                                                if !ok {
+                                                    break "error al re-suscribir";
+                                                }
+                                            }
+                                            None => break "hueco en la secuencia de la conexión",
+                                        }
                                     }
                                 }
                                 Ok(Some(Ok(Message::Ping(p)))) => {

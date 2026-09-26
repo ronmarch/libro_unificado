@@ -25,6 +25,7 @@ use lu_core::{init_clock, MarketId, MarketKind, Qty, Venue};
 use lu_flow::{Aligner, AlignerConfig};
 use lu_metrics::{Metrics, MetricsConfig};
 use lu_net::{run_line, FrameSink, LineCmd, LineSpec};
+use lu_coinbase::CoinbaseProtocol;
 use lu_okx::{OkxEndpoints, OkxProtocol};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -35,7 +36,8 @@ use view::Views;
 const USAGE: &str = "\
 uso: lu-node [opciones]
   --symbol SOLUSDT        símbolo (default SOLUSDT)
-  --venues binance        exchanges: binance,okx (default binance)
+  --venues binance        exchanges: binance,okx,coinbase (default binance)
+  --coinbase-product SOL-USD  producto Coinbase (solo spot; USD se suma como USDT)
   --markets spot,perp     mercados a sincronizar (default spot,perp)
   --lines 2               líneas redundantes por stream, 1..4 (default 2)
   --listen 127.0.0.1:9100 API de observabilidad
@@ -55,6 +57,7 @@ simulación y caos (F5; sin red):
 struct Args {
     symbol: String,
     venues: Vec<Venue>,
+    coinbase_product: String,
     markets: Vec<MarketKind>,
     lines: usize,
     listen: SocketAddr,
@@ -69,6 +72,7 @@ fn parse_args() -> Result<Args, String> {
     let mut a = Args {
         symbol: "SOLUSDT".into(),
         venues: vec![Venue::Binance],
+        coinbase_product: "SOL-USD".into(),
         markets: vec![MarketKind::Spot, MarketKind::Perp],
         lines: 2,
         listen: "127.0.0.1:9100".parse().map_err(|e| format!("{e}"))?,
@@ -85,13 +89,15 @@ fn parse_args() -> Result<Args, String> {
         let mut val = || it.next().ok_or_else(|| format!("falta valor para {k}"));
         match k.as_str() {
             "--symbol" => a.symbol = val()?.to_uppercase(),
+            "--coinbase-product" => a.coinbase_product = val()?.to_uppercase(),
             "--venues" => {
                 a.venues = val()?
                     .split(',')
                     .map(|v| match v.trim() {
                         "binance" => Ok(Venue::Binance),
                         "okx" => Ok(Venue::Okx),
-                        o => Err(format!("venue no soportado aún: {o} (binance, okx)")),
+                        "coinbase" => Ok(Venue::Coinbase),
+                        o => Err(format!("venue no soportado aún: {o} (binance, okx, coinbase)")),
                     })
                     .collect::<Result<_, _>>()?
             }
@@ -377,6 +383,61 @@ fn start_okx(
     });
 }
 
+/// Coinbase Advanced Trade: la línea 0 alimenta el libro (secuencia por conexión);
+/// las demás solo trades. Snapshots por re-suscripción de la línea 0.
+#[allow(clippy::too_many_arguments)]
+fn start_coinbase(
+    rt: &tokio::runtime::Runtime,
+    args: &Args,
+    market: MarketId,
+    tls: &Arc<rustls::ClientConfig>,
+    tx: crossbeam_channel::Sender<EngineMsg>,
+    counters: Arc<IngestCounters>,
+    mut req_rx: mpsc::UnboundedReceiver<()>,
+    sd_rx: &watch::Receiver<bool>,
+) {
+    let label = market.to_string();
+    let mut depth_cmd = None;
+    for li in 0..args.lines.max(1) {
+        let (ctx, crx) = mpsc::unbounded_channel();
+        if li == 0 {
+            depth_cmd = Some(ctx);
+        }
+        let sink: Arc<dyn FrameSink> = Arc::new(ChannelSink::new(
+            tx.clone(),
+            counters.clone(),
+            StreamKind::Depth,
+            label.clone(),
+        ));
+        let tag = if li == 0 { "level2+trades" } else { "trades" };
+        rt.spawn(run_line(
+            LineSpec::new(format!("{label}/{tag}"), li as u8, lu_coinbase::proto::WS_URL, tls.clone()),
+            Arc::new(CoinbaseProtocol::new(args.coinbase_product.clone(), li == 0)),
+            sink,
+            Some(crx),
+            sd_rx.clone(),
+        ));
+    }
+    let mut sd = sd_rx.clone();
+    rt.spawn(async move {
+        let start = tokio::time::Instant::now();
+        loop {
+            tokio::select! {
+                _ = sd.changed() => return,
+                r = req_rx.recv() => if r.is_none() { return },
+            }
+            while req_rx.try_recv().is_ok() {}
+            if start.elapsed() < Duration::from_secs(3) {
+                continue; // la suscripción inicial ya trae snapshot
+            }
+            if let Some(c) = &depth_cmd {
+                let _ = c.send(LineCmd::Resnapshot);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+}
+
 fn aligner() -> engine::Obs {
     Aligner::new(
         AlignerConfig::default(),
@@ -452,10 +513,22 @@ fn main() {
         .venues
         .iter()
         .flat_map(|v| args.markets.iter().map(move |k| (*v, *k)))
+        .filter(|(v, k)| {
+            let ok = !(*v == Venue::Coinbase && *k == MarketKind::Perp);
+            if !ok {
+                tracing::warn!("Coinbase no tiene perpetuos en su exchange spot: se omite coinbase.perp");
+            }
+            ok
+        })
         .collect();
     let multi_venue = args.venues.len() > 1;
     for (i, (venue, kind)) in plan.into_iter().enumerate() {
-        let market = MarketId::new(venue, kind, args.symbol.clone());
+        let symbol = if venue == Venue::Coinbase {
+            args.coinbase_product.replace('-', "")
+        } else {
+            args.symbol.clone()
+        };
+        let market = MarketId::new(venue, kind, symbol);
         let label = market.to_string();
         let (tx, rx) = crossbeam_channel::bounded::<EngineMsg>(65_536);
         let (req_tx, req_rx) = mpsc::unbounded_channel();
@@ -508,7 +581,8 @@ fn main() {
             ),
         };
         let handle = spawn(match (venue, kind) {
-            (Venue::Okx, _) => Rule::Okx,
+            // Coinbase usa un contador contiguo con `prev`: misma regla que OKX.
+            (Venue::Okx | Venue::Coinbase, _) => Rule::Okx,
             (_, MarketKind::Spot) => Rule::BinanceSpot,
             (_, MarketKind::Perp) => Rule::BinanceFutures,
         });
@@ -530,6 +604,16 @@ fn main() {
         }
 
         match venue {
+            Venue::Coinbase => start_coinbase(
+                &rt,
+                &args,
+                market.clone(),
+                &tls,
+                tx.clone(),
+                counters.clone(),
+                req_rx,
+                &sd_rx,
+            ),
             Venue::Okx => start_okx(
                 &rt,
                 &args,
