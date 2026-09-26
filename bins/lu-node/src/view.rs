@@ -341,6 +341,7 @@ pub fn render_prometheus(views: &[Arc<BookView>]) -> String {
             ("invalid_sequence", s.resync_invalid_sequence),
             ("crossed", s.resync_crossed),
             ("manual", s.resync_manual),
+            ("venue_reset", s.resync_venue_reset),
         ] {
             w.sample(
                 "lu_sync_resync_total",

@@ -13,11 +13,11 @@
 //! * El feed Exchange sin autenticar degrada `level2` a top 50 y sus `l2update` no traen
 //!   secuencia: descartado.
 //!
-//! Diseño: cada conexión valida su propia continuidad; ante un hueco deja de emitir
-//! profundidad y pide re-suscripción (snapshot nuevo). La profundidad se numera con un
-//! contador sintético contiguo por línea (`prev = id − 1`, regla `OkxRule`), que avanza
-//! en snapshots y updates y nunca retrocede entre reconexiones. Solo la línea 0 emite
-//! profundidad; las demás aportan trades (deduplicados por `trade_id`).
+//! Diseño (standby caliente): cada conexión mantiene su espejo del libro y valida su propia
+//! continuidad; ante un hueco suelta el liderazgo y pide re-suscripción. Solo la línea
+//! líder (`lu_net::DepthLeader`) emite; la que asume un liderazgo vacante emite
+//! `MarketEvent::Reset` con su libro completo. Ids del contador del líder, contiguos
+//! (`prev = id − 1`, regla `OkxRule`). Trades de todas las líneas (deduplicados por `trade_id`).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

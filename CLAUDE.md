@@ -38,7 +38,8 @@ F0–F5 hechas para Binance (ver `ARCHITECTURE.md` §5 bis – §5 quinquies). P
    antes de escribir el parser; verificar contra snapshots independientes (ver §6 bis).
 2. Supuestos de F3 confirmados por el usuario (2026-09-26): R ≈ 1 = 0,8–1,25; alto = ≥ P90;
    referencia del CVD = medio spot; cantidades = foto actual.
-3. Soak de 72 h con Binance real en la VM (`deploy/soak.sh`) y calibrar δ de F2.
+3. Redundancia de profundidad Coinbase/Kraken: standby caliente con `DepthLeader` (§6 sexies).
+4. Soak de 72 h con Binance real en la VM (`deploy/soak.sh`) y calibrar δ de F2.
 
 Antes de tocar `lu-flow` o `lu-metrics`: `deploy/chaos-sim.sh 5` debe terminar OK.
 

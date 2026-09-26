@@ -3,9 +3,10 @@
 use lu_core::{
     AggTrade, Aggressor, DepthDiff, DepthSnapshot, Level, MarketEvent, Px, Qty, RxStamp,
 };
-use lu_net::Protocol;
+use lu_net::{DepthLeader, Protocol};
 use serde::Deserialize;
-use std::sync::Mutex;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// URL pública.
@@ -14,25 +15,29 @@ pub const WS_URL: &str = "wss://advanced-trade-ws.coinbase.com";
 #[derive(Debug, Default)]
 struct State {
     last_seq: Option<u64>,
-    counter: u64,
     awaiting_snapshot: bool,
     resync: bool,
+    bids: BTreeMap<i64, i64>,
+    asks: BTreeMap<i64, i64>,
 }
 
 /// Protocolo Coinbase para un producto y una línea (estado por conexión).
 #[derive(Debug)]
 pub struct CoinbaseProtocol {
     product: String,
-    depth: bool,
+    line: u8,
+    leader: Arc<DepthLeader>,
     st: Mutex<State>,
 }
 
 impl CoinbaseProtocol {
-    /// `depth = true` solo en la línea que alimenta el libro; las demás, solo trades.
-    pub fn new(product: impl Into<String>, depth: bool) -> Self {
+    /// Todas las líneas de un mercado comparten `leader`: cada una mantiene y valida su
+    /// propio libro (secuencia por conexión); solo la líder publica.
+    pub fn new(product: impl Into<String>, line: u8, leader: Arc<DepthLeader>) -> Self {
         Self {
             product: product.into(),
-            depth,
+            line,
+            leader,
             st: Mutex::new(State {
                 awaiting_snapshot: true,
                 ..State::default()
@@ -98,6 +103,14 @@ struct Trade<'a> {
     side: &'a str,
 }
 
+fn apply(m: &mut BTreeMap<i64, i64>, l: &Level) {
+    if l.qty.is_zero() {
+        m.remove(&l.px.raw());
+    } else {
+        m.insert(l.px.raw(), l.qty.raw());
+    }
+}
+
 fn levels(updates: &[Upd<'_>]) -> Result<(Vec<Level>, Vec<Level>, u64), String> {
     let (mut bids, mut asks, mut ts) = (Vec::new(), Vec::new(), 0u64);
     for u in updates {
@@ -121,21 +134,28 @@ impl Protocol for CoinbaseProtocol {
             s.last_seq = None;
             s.awaiting_snapshot = true;
             s.resync = false;
+            s.bids.clear();
+            s.asks.clear();
         }
-        let mut v = vec![
+        self.leader.release(self.line);
+        vec![
             self.msg("subscribe", "heartbeats"),
             self.msg("subscribe", "market_trades"),
-        ];
-        if self.depth {
-            v.push(self.msg("subscribe", "level2"));
+            self.msg("subscribe", "level2"),
+        ]
+    }
+
+    fn on_disconnect(&self) {
+        self.leader.release(self.line);
+        if let Ok(mut s) = self.st.lock() {
+            s.awaiting_snapshot = true;
         }
-        v
     }
 
     fn resubscribe(&self) -> Option<Vec<String>> {
-        if !self.depth {
-            return Some(Vec::new());
-        }
+        // Pedido de snapshot del motor: el liderazgo queda vacante y lo asume la primera
+        // línea con estado válido.
+        self.leader.vacate();
         if let Ok(mut s) = self.st.lock() {
             s.awaiting_snapshot = true;
         }
@@ -168,45 +188,72 @@ impl Protocol for CoinbaseProtocol {
         if let Some(seq) = env.sequence_num {
             if let Some(last) = st.last_seq {
                 if seq != last + 1 {
-                    // Hueco en ESTA conexión: la profundidad ya no es confiable.
+                    // Hueco en ESTA conexión: su libro ya no es confiable.
                     st.awaiting_snapshot = true;
-                    st.resync = self.depth;
+                    st.resync = true;
+                    self.leader.release(self.line);
                 }
             }
             st.last_seq = Some(seq);
         }
         match env.channel {
-            Some("l2_data") if self.depth => {
+            Some("l2_data") => {
                 for e in &env.events {
                     let (bids, asks, ts) = levels(&e.updates)?;
-                    match e.kind {
+                    let snapshot = match e.kind {
                         Some("snapshot") => {
-                            st.counter += 1;
+                            st.bids.clear();
+                            st.asks.clear();
                             st.awaiting_snapshot = false;
-                            out.push(MarketEvent::Snapshot(DepthSnapshot {
-                                last_update_id: st.counter,
-                                limit: 0, // libro completo: sin truncamiento
-                                rolling: false,
-                                bids,
-                                asks,
-                                exch_ts_ms: Some(ts),
-                                rx,
-                            }));
+                            true
                         }
-                        Some("update") if !st.awaiting_snapshot => {
-                            st.counter += 1;
-                            out.push(MarketEvent::Depth(DepthDiff {
-                                first_id: st.counter,
-                                last_id: st.counter,
-                                prev_last_id: Some(st.counter - 1),
-                                exch_ts_ms: ts,
-                                match_ts_ms: None,
-                                bids,
-                                asks,
-                                rx,
-                            }));
-                        }
-                        _ => {}
+                        Some("update") if !st.awaiting_snapshot => false,
+                        _ => continue,
+                    };
+                    for l in &bids {
+                        apply(&mut st.bids, l);
+                    }
+                    for l in &asks {
+                        apply(&mut st.asks, l);
+                    }
+                    // Libro válido. La líder publica; si el liderazgo está vacante esta
+                    // línea lo asume y publica su libro completo como estado autoritativo.
+                    let acquired = self.leader.try_acquire(self.line);
+                    if !acquired && !self.leader.is_leader(self.line) {
+                        continue; // seguidora: mantiene su libro en silencio (standby)
+                    }
+                    let id = self.leader.next_id();
+                    if acquired || snapshot {
+                        let lv = |m: &BTreeMap<i64, i64>| -> Vec<Level> {
+                            m.iter()
+                                .map(|(p, q)| Level {
+                                    px: Px::from_raw(*p),
+                                    qty: Qty::from_raw(*q),
+                                })
+                                .collect()
+                        };
+                        let mut b = lv(&st.bids);
+                        b.reverse();
+                        out.push(MarketEvent::Reset(DepthSnapshot {
+                            last_update_id: id,
+                            limit: 0, // libro completo: sin truncamiento
+                            rolling: false,
+                            bids: b,
+                            asks: lv(&st.asks),
+                            exch_ts_ms: Some(ts),
+                            rx,
+                        }));
+                    } else {
+                        out.push(MarketEvent::Depth(DepthDiff {
+                            first_id: id,
+                            last_id: id,
+                            prev_last_id: Some(id - 1),
+                            exch_ts_ms: ts,
+                            match_ts_ms: None,
+                            bids,
+                            asks,
+                            rx,
+                        }));
                     }
                 }
             }
@@ -261,11 +308,17 @@ mod tests {
         out
     }
 
+    fn upd(seq: u64, px: &str, qty: &str) -> String {
+        UPD.replace("\"sequence_num\":1", &format!("\"sequence_num\":{seq}"))
+            .replace("\"120.73\"", &format!("\"{px}\""))
+            .replace("\"42.55393162\"", &format!("\"{qty}\""))
+    }
+
     #[test]
     fn snapshot_update_y_contador_contiguo() {
-        let p = CoinbaseProtocol::new("SOL-USD", true);
+        let p = CoinbaseProtocol::new("SOL-USD", 0, DepthLeader::new());
         p.on_connect();
-        let MarketEvent::Snapshot(s) = &run(&p, SNAP)[0] else {
+        let MarketEvent::Reset(s) = &run(&p, SNAP)[0] else {
             panic!()
         };
         assert_eq!((s.last_update_id, s.limit), (1, 0));
@@ -280,7 +333,7 @@ mod tests {
 
     #[test]
     fn trade_side_es_maker_y_agresor_opuesto() {
-        let p = CoinbaseProtocol::new("SOL-USD", false);
+        let p = CoinbaseProtocol::new("SOL-USD", 0, DepthLeader::new());
         p.on_connect();
         let MarketEvent::Trade(t) = &run(&p, TRADE)[0] else {
             panic!()
@@ -291,7 +344,7 @@ mod tests {
 
     #[test]
     fn hueco_de_secuencia_detiene_profundidad_y_pide_resync() {
-        let p = CoinbaseProtocol::new("SOL-USD", true);
+        let p = CoinbaseProtocol::new("SOL-USD", 0, DepthLeader::new());
         p.on_connect();
         run(&p, SNAP);
         let gap = UPD.replace("\"sequence_num\":1", "\"sequence_num\":5");
@@ -304,12 +357,49 @@ mod tests {
         let upd2 = UPD.replace("\"sequence_num\":1", "\"sequence_num\":6");
         assert!(run(&p, &upd2).is_empty(), "sigue esperando snapshot");
         let snap2 = SNAP.replace("\"sequence_num\":0", "\"sequence_num\":7");
-        let MarketEvent::Snapshot(s) = &run(&p, &snap2)[0] else {
+        let MarketEvent::Reset(s) = &run(&p, &snap2)[0] else {
             panic!()
         };
-        assert_eq!(
-            s.last_update_id, 2,
-            "el contador sigue avanzando: nunca retrocede"
+        assert_eq!(s.last_update_id, 2, "el contador nunca retrocede");
+    }
+
+    #[test]
+    fn relevo_de_linea_publica_el_libro_de_la_seguidora() {
+        let leader = DepthLeader::new();
+        let a = CoinbaseProtocol::new("SOL-USD", 0, leader.clone());
+        let b = CoinbaseProtocol::new("SOL-USD", 1, leader.clone());
+        a.on_connect();
+        b.on_connect();
+        assert!(matches!(run(&a, SNAP)[0], MarketEvent::Reset(_)), "A asume");
+        assert!(run(&b, SNAP).is_empty(), "B es seguidora");
+        assert!(matches!(
+            run(&a, &upd(1, "120.73", "5")).as_slice(),
+            [MarketEvent::Depth(_)]
+        ));
+        assert!(run(&b, &upd(1, "120.73", "5")).is_empty());
+        // A pierde un mensaje (hueco en su conexión): deja el liderazgo.
+        assert!(run(&a, &upd(3, "120.74", "6")).is_empty());
+        assert!(!leader.is_leader(0));
+        // B, válida, recibe el mismo update y asume publicando SU libro completo.
+        let ev = run(&b, &upd(2, "120.74", "6"));
+        let [MarketEvent::Reset(s)] = ev.as_slice() else {
+            panic!("se esperaba el relevo: {ev:?}")
+        };
+        assert!(leader.is_leader(1));
+        assert_eq!(s.last_update_id, 3, "ids contiguos tras el relevo");
+        let bids: Vec<String> = s
+            .bids
+            .iter()
+            .map(|l| format!("{}={}", l.px, l.qty))
+            .collect();
+        assert_eq!(bids, ["120.74=6", "120.73=5", "120.7=110.06502693"]);
+        assert!(
+            s.asks.is_empty(),
+            "el ask 120.72 fue eliminado por el update"
         );
+        let MarketEvent::Depth(d) = &run(&b, &upd(3, "120.75", "7"))[0] else {
+            panic!()
+        };
+        assert_eq!((d.last_id, d.prev_last_id), (4, Some(3)));
     }
 }

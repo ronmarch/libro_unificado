@@ -276,6 +276,11 @@ impl<R: SeqRule> Engine<R> {
             }
             EngineMsg::Event(MarketEvent::Trade(t)) => self.on_trade(t),
             EngineMsg::Event(MarketEvent::Ignored) | EngineMsg::Shutdown => {}
+            EngineMsg::Event(MarketEvent::Reset(s)) => {
+                tracing::warn!(market = %self.label, id = s.last_update_id, "relevo de línea: estado autoritativo nuevo");
+                let st = self.sync.on_reset(s, now);
+                self.after(st);
+            }
             EngineMsg::Event(MarketEvent::Snapshot(s)) | EngineMsg::Snapshot(s) => {
                 tracing::info!(
                     market = %self.label,

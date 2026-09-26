@@ -9,5 +9,5 @@
 pub mod line;
 pub mod tls;
 
-pub use line::{run_line, FrameSink, LineCmd, LineSpec, Protocol};
+pub use line::{run_line, DepthLeader, FrameSink, LineCmd, LineSpec, Protocol};
 pub use tls::{client_config, TlsError};

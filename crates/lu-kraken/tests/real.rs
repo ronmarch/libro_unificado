@@ -3,7 +3,7 @@
 
 use lu_core::{MarketEvent, Px, Qty, RxStamp};
 use lu_kraken::KrakenProtocol;
-use lu_net::Protocol;
+use lu_net::{DepthLeader, Protocol};
 
 const FIXTURE: &str = include_str!("kraken_sol_usd.jsonl");
 
@@ -15,7 +15,7 @@ fn run(p: &KrakenProtocol, line: &str) -> Vec<MarketEvent> {
 
 #[test]
 fn todos_los_checksums_reales_coinciden() {
-    let p = KrakenProtocol::new("SOL/USD", true, 1000, 2, 8);
+    let p = KrakenProtocol::new("SOL/USD", 1000, 2, 8, 0, DepthLeader::new());
     p.on_connect();
     let mut n = 0;
     for line in FIXTURE.lines().filter(|l| !l.is_empty()) {
@@ -30,11 +30,11 @@ fn todos_los_checksums_reales_coinciden() {
 
 #[test]
 fn checksum_alterado_detiene_profundidad_y_pide_resync() {
-    let p = KrakenProtocol::new("SOL/USD", true, 1000, 2, 8);
+    let p = KrakenProtocol::new("SOL/USD", 1000, 2, 8, 0, DepthLeader::new());
     p.on_connect();
     let mut lines = FIXTURE.lines().filter(|l| !l.is_empty());
     let snap = lines.next().unwrap();
-    assert!(matches!(run(&p, snap)[0], MarketEvent::Snapshot(_)));
+    assert!(matches!(run(&p, snap)[0], MarketEvent::Reset(_)));
     let upd = lines.next().unwrap();
     let i = upd.find("\"checksum\":").unwrap() + 11;
     let j = i + upd[i..].find(|c: char| !c.is_ascii_digit()).unwrap();
@@ -47,8 +47,8 @@ fn checksum_alterado_detiene_profundidad_y_pide_resync() {
     assert!(p.take_resync());
     // Siguientes updates tampoco se emiten hasta un snapshot nuevo.
     assert!(run(&p, lines.next().unwrap()).is_empty());
-    let MarketEvent::Snapshot(s) = &run(&p, snap)[0] else {
-        panic!()
+    let MarketEvent::Reset(s) = &run(&p, snap)[0] else {
+        panic!("tras un snapshot válido la línea reasume y publica su estado")
     };
     assert_eq!(s.last_update_id, 2, "el contador nunca retrocede");
 }
@@ -57,7 +57,7 @@ fn checksum_alterado_detiene_profundidad_y_pide_resync() {
 fn recorte_top_n_emite_bajas_y_verifica_checksum() {
     use lu_kraken::crc::crc32;
     // N = 2. Precio con 2 decimales, cantidad con 8 (como SOL/USD).
-    let p = KrakenProtocol::new("SOL/USD", true, 2, 2, 8);
+    let p = KrakenProtocol::new("SOL/USD", 2, 2, 8, 0, DepthLeader::new());
     p.on_connect();
     let c1 = crc32(
         concat!(
@@ -73,7 +73,7 @@ fn recorte_top_n_emite_bajas_y_verifica_checksum() {
     let snap = format!(
         r#"{{"channel":"book","type":"snapshot","data":[{{"symbol":"SOL/USD","bids":[{{"price":100.0,"qty":1.0}},{{"price":99.0,"qty":1.0}}],"asks":[{{"price":101.0,"qty":1.0}}],"checksum":{c1},"timestamp":"2026-09-26T04:41:10.000000Z"}}]}}"#
     );
-    assert!(matches!(run(&p, &snap)[0], MarketEvent::Snapshot(_)));
+    assert!(matches!(run(&p, &snap)[0], MarketEvent::Reset(_)));
     // Nuevo mejor bid 100.50: el 99.00 sale del top 2 y debe emitirse como baja.
     let c2 = crc32(
         concat!(
@@ -102,4 +102,59 @@ fn recorte_top_n_emite_bajas_y_verifica_checksum() {
         qty: Qty::ZERO
     }));
     assert_eq!(p.checksum_stats(), (2, 0));
+}
+
+#[test]
+fn relevo_de_linea_lider_con_ids_contiguos() {
+    // Dos líneas reciben los mismos mensajes reales; se corrompe la línea líder.
+    let leader = DepthLeader::new();
+    let a = KrakenProtocol::new("SOL/USD", 1000, 2, 8, 0, leader.clone());
+    let b = KrakenProtocol::new("SOL/USD", 1000, 2, 8, 1, leader.clone());
+    a.on_connect();
+    b.on_connect();
+    let lines: Vec<&str> = FIXTURE.lines().filter(|l| !l.is_empty()).collect();
+    let mut ids = Vec::new();
+    let mut resets = 0;
+    let mut record = |evs: Vec<MarketEvent>| {
+        for e in evs {
+            match e {
+                MarketEvent::Reset(s) => {
+                    resets += 1;
+                    ids.push((s.last_update_id, None));
+                }
+                MarketEvent::Depth(d) => ids.push((d.last_id, d.prev_last_id)),
+                _ => {}
+            }
+        }
+    };
+    for (i, l) in lines.iter().enumerate() {
+        let la = if i == 20 {
+            // La línea A (líder) recibe un update corrupto: pierde el liderazgo.
+            let k = l.find("\"checksum\":").unwrap() + 11;
+            let j = k + l[k..].find(|c: char| !c.is_ascii_digit()).unwrap();
+            let orig: u32 = l[k..j].parse().unwrap();
+            format!("{}{}{}", &l[..k], orig ^ 1, &l[j..])
+        } else {
+            l.to_string()
+        };
+        record(run(&a, &la));
+        record(run(&b, l));
+        if i < 20 {
+            assert!(leader.is_leader(0), "A lidera mientras es válida");
+        }
+    }
+    assert!(leader.is_leader(1), "B asumió el liderazgo");
+    assert_eq!(resets, 2, "estado inicial de A + relevo de B");
+    // Ids contiguos: cada update encadena con el anterior, sin saltos ni retrocesos.
+    for w in ids.windows(2) {
+        assert_eq!(w[1].0, w[0].0 + 1, "ids contiguos");
+        if let Some(prev) = w[1].1 {
+            assert_eq!(prev, w[0].0);
+        }
+    }
+    assert_eq!(
+        ids.len(),
+        lines.len(),
+        "cada mensaje verificado se publica exactamente una vez"
+    );
 }

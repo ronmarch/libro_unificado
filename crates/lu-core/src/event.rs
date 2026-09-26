@@ -147,6 +147,9 @@ pub enum MarketEvent {
     Trade(AggTrade),
     /// Snapshot entregado por el propio stream (OKX, Bybit, Kraken: al suscribirse).
     Snapshot(DepthSnapshot),
+    /// Estado autoritativo que REEMPLAZA el libro aunque esté en vivo (relevo de la línea
+    /// líder en venues cuya secuencia es por conexión: Coinbase, Kraken).
+    Reset(DepthSnapshot),
     /// Mensaje válido que este sistema no consume (p. ej. otros streams).
     Ignored,
 }

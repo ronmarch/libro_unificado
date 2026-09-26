@@ -1,14 +1,15 @@
-//! Protocolo, espejo verificado por CRC32 y parseo de Kraken v2.
+//! Protocolo, espejo verificado por CRC32, liderazgo entre líneas y parseo de Kraken v2.
 
 use crate::crc::crc32;
 use lu_core::{
     parse_json_number8, rfc3339_ms, AggTrade, Aggressor, DepthDiff, DepthSnapshot, Level,
     MarketEvent, Px, Qty, RxStamp, DECIMALS,
 };
-use lu_net::Protocol;
+use lu_net::{DepthLeader, Protocol};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 /// URL pública.
@@ -16,7 +17,6 @@ pub const WS_URL: &str = "wss://ws.kraken.com/v2";
 
 #[derive(Debug, Default)]
 struct State {
-    counter: u64,
     awaiting_snapshot: bool,
     resync: bool,
     bids: BTreeMap<i64, i64>,
@@ -29,7 +29,8 @@ struct State {
 #[derive(Debug)]
 pub struct KrakenProtocol {
     symbol: String,
-    depth: bool,
+    line: u8,
+    leader: Arc<DepthLeader>,
     n: usize,
     price_dec: u32,
     qty_dec: u32,
@@ -38,17 +39,20 @@ pub struct KrakenProtocol {
 
 impl KrakenProtocol {
     /// `symbol` estilo `SOL/USD`; `depth_levels` ∈ {10, 25, 100, 500, 1000};
-    /// precisión del par (de `AssetPairs`) para el checksum.
+    /// precisión del par (de `AssetPairs`) para el checksum. Todas las líneas de un
+    /// mercado comparten `leader`: cada una verifica su propio libro; publica la líder.
     pub fn new(
         symbol: impl Into<String>,
-        depth: bool,
         depth_levels: usize,
         price_dec: u32,
         qty_dec: u32,
+        line: u8,
+        leader: Arc<DepthLeader>,
     ) -> Self {
         Self {
             symbol: symbol.into(),
-            depth,
+            line,
+            leader,
             n: depth_levels,
             price_dec,
             qty_dec,
@@ -167,17 +171,24 @@ impl Protocol for KrakenProtocol {
             s.bids.clear();
             s.asks.clear();
         }
-        let mut v = vec![self.msg("subscribe", "trade")];
-        if self.depth {
-            v.push(self.msg("subscribe", "book"));
+        self.leader.release(self.line);
+        vec![
+            self.msg("subscribe", "trade"),
+            self.msg("subscribe", "book"),
+        ]
+    }
+
+    fn on_disconnect(&self) {
+        self.leader.release(self.line);
+        if let Ok(mut s) = self.st.lock() {
+            s.awaiting_snapshot = true;
         }
-        v
     }
 
     fn resubscribe(&self) -> Option<Vec<String>> {
-        if !self.depth {
-            return Some(Vec::new());
-        }
+        // Pedido de snapshot del motor: el liderazgo queda vacante y lo asume la primera
+        // línea con estado verificado (esta, tras re-suscribirse, u otra ya válida).
+        self.leader.vacate();
         if let Ok(mut s) = self.st.lock() {
             s.awaiting_snapshot = true;
         }
@@ -208,7 +219,7 @@ impl Protocol for KrakenProtocol {
         }
         let Some(data) = env.data else { return Ok(()) };
         match env.channel {
-            Some("book") if self.depth => {
+            Some("book") => {
                 let books: Vec<Book<'_>> =
                     serde_json::from_str(data.get()).map_err(|e| e.to_string())?;
                 let mut st = self
@@ -259,18 +270,27 @@ impl Protocol for KrakenProtocol {
                         st.checksum_bad += 1;
                         st.awaiting_snapshot = true;
                         st.resync = true;
+                        self.leader.release(self.line);
                         return Ok(());
                     }
                     st.checksum_ok += 1;
-                    st.counter += 1;
                     if snapshot {
                         st.awaiting_snapshot = false;
+                    }
+                    // Estado verificado. La líder publica; si el liderazgo está vacante esta
+                    // línea lo asume y publica su libro completo como estado autoritativo.
+                    let acquired = self.leader.try_acquire(self.line);
+                    if !acquired && !self.leader.is_leader(self.line) {
+                        continue; // seguidora: verifica en silencio (standby en caliente)
+                    }
+                    let id = self.leader.next_id();
+                    if acquired || snapshot {
                         let mirror_b: Vec<(i64, i64)> =
                             st.bids.iter().rev().map(|(p, q)| (*p, *q)).collect();
                         let mirror_a: Vec<(i64, i64)> =
                             st.asks.iter().map(|(p, q)| (*p, *q)).collect();
-                        out.push(MarketEvent::Snapshot(DepthSnapshot {
-                            last_update_id: st.counter,
+                        out.push(MarketEvent::Reset(DepthSnapshot {
+                            last_update_id: id,
                             limit: self.n,
                             rolling: true,
                             bids: to_levels(&mirror_b),
@@ -284,9 +304,9 @@ impl Protocol for KrakenProtocol {
                         let mut al = asks;
                         al.extend(removed_a);
                         out.push(MarketEvent::Depth(DepthDiff {
-                            first_id: st.counter,
-                            last_id: st.counter,
-                            prev_last_id: Some(st.counter - 1),
+                            first_id: id,
+                            last_id: id,
+                            prev_last_id: Some(id - 1),
                             exch_ts_ms: ts,
                             match_ts_ms: None,
                             bids: to_levels(&bl),

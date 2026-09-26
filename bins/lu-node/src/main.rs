@@ -27,7 +27,7 @@ use lu_core::{init_clock, MarketId, MarketKind, Qty, Venue};
 use lu_flow::{Aligner, AlignerConfig};
 use lu_kraken::KrakenProtocol;
 use lu_metrics::{Metrics, MetricsConfig};
-use lu_net::{run_line, FrameSink, LineCmd, LineSpec};
+use lu_net::{run_line, DepthLeader, FrameSink, LineCmd, LineSpec};
 use lu_okx::{OkxEndpoints, OkxProtocol};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -365,8 +365,8 @@ fn start_okx(
     spawn_resnapshot(rt, cmd_txs, req_rx, sd_rx);
 }
 
-/// Coinbase Advanced Trade: la línea 0 alimenta el libro (secuencia por conexión);
-/// las demás solo trades. Snapshots por re-suscripción de la línea 0.
+/// Coinbase Advanced Trade: todas las líneas con libro (secuencia por conexión), una líder
+/// publica (standby caliente). Snapshots por re-suscripción (round-robin).
 #[allow(clippy::too_many_arguments)]
 fn start_coinbase(
     rt: &tokio::runtime::Runtime,
@@ -379,19 +379,20 @@ fn start_coinbase(
     sd_rx: &watch::Receiver<bool>,
 ) {
     let label = market.to_string();
-    let mut depth_cmd = None;
+    // Todas las líneas llevan libro; una sola publica (líder) y las demás quedan en
+    // standby caliente: si la líder cae o pierde un mensaje, otra asume sin snapshot.
+    let leader = DepthLeader::new();
+    let mut cmds = Vec::new();
     for li in 0..args.lines.max(1) {
         let (ctx, crx) = mpsc::unbounded_channel();
-        if li == 0 {
-            depth_cmd = Some(ctx);
-        }
+        cmds.push(ctx);
         let sink: Arc<dyn FrameSink> = Arc::new(ChannelSink::new(
             tx.clone(),
             counters.clone(),
             StreamKind::Depth,
             label.clone(),
         ));
-        let tag = if li == 0 { "level2+trades" } else { "trades" };
+        let tag = "level2+trades";
         rt.spawn(run_line(
             LineSpec::new(
                 format!("{label}/{tag}"),
@@ -401,18 +402,19 @@ fn start_coinbase(
             ),
             Arc::new(CoinbaseProtocol::new(
                 args.coinbase_product.clone(),
-                li == 0,
+                li as u8,
+                leader.clone(),
             )),
             sink,
             Some(crx),
             sd_rx.clone(),
         ));
     }
-    spawn_resnapshot(rt, depth_cmd.into_iter().collect(), req_rx, sd_rx);
+    spawn_resnapshot(rt, cmds, req_rx, sd_rx);
 }
 
-/// Kraken v2: precisión del par por REST (necesaria para el CRC32), línea 0 con libro
-/// verificado por checksum en cada update; las demás, trades.
+/// Kraken v2: precisión del par por REST (necesaria para el CRC32); todas las líneas
+/// con libro verificado por checksum en cada update, una líder publica (standby caliente).
 #[allow(clippy::too_many_arguments)]
 fn start_kraken(
     rt: &tokio::runtime::Runtime,
@@ -450,19 +452,20 @@ fn start_kraken(
         base_per_contract: Qty::from_units(1),
     };
     rt.spawn(async move { snapshot::deliver(&tx2, EngineMsg::Spec(spec)).await });
-    let mut depth_cmd = None;
+    // Todas las líneas llevan libro; una sola publica (líder) y las demás quedan en
+    // standby caliente: si la líder cae o pierde un mensaje, otra asume sin snapshot.
+    let leader = DepthLeader::new();
+    let mut cmds = Vec::new();
     for li in 0..args.lines.max(1) {
         let (ctx, crx) = mpsc::unbounded_channel();
-        if li == 0 {
-            depth_cmd = Some(ctx);
-        }
+        cmds.push(ctx);
         let sink: Arc<dyn FrameSink> = Arc::new(ChannelSink::new(
             tx.clone(),
             counters.clone(),
             StreamKind::Depth,
             label.clone(),
         ));
-        let tag = if li == 0 { "book+trade" } else { "trade" };
+        let tag = "book+trade";
         rt.spawn(run_line(
             LineSpec::new(
                 format!("{label}/{tag}"),
@@ -472,17 +475,18 @@ fn start_kraken(
             ),
             Arc::new(KrakenProtocol::new(
                 args.kraken_symbol.clone(),
-                li == 0,
                 1000,
                 price_dec,
                 qty_dec,
+                li as u8,
+                leader.clone(),
             )),
             sink,
             Some(crx),
             sd_rx.clone(),
         ));
     }
-    spawn_resnapshot(rt, depth_cmd.into_iter().collect(), req_rx, sd_rx);
+    spawn_resnapshot(rt, cmds, req_rx, sd_rx);
 }
 
 /// Snapshots por re-suscripción: cada suscripción inicial ya trae uno; los pedidos del

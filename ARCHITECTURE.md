@@ -296,8 +296,8 @@ al feed Exchange) ⇒ agresor = opuesto. Coinbase no tiene perpetuos en este exc
 * Cada conexión valida su propia continuidad; ante un hueco deja de emitir profundidad y
   pide re-suscripción (`Protocol::take_resync`). La profundidad usa un contador sintético
   contiguo por línea que nunca retrocede (regla `OkxRule`, encadenada por `prev`).
-* Sin arbitraje A/B de profundidad (ids no comparables entre conexiones): la línea 0 alimenta
-  el libro; las demás aportan trades (deduplicados por `trade_id`). Límite declarado.
+* Standby caliente (§6 sexies): todas las líneas mantienen su espejo del libro; la líder
+  publica, las demás validan en silencio. Trades de todas las líneas, deduplicados por `trade_id`.
 * **Supuesto declarado**: producto SOL-USD (SOL-USDT tiene ~0,6 % de su volumen); en el libro
   unificado se suma con los libros en USDT tratando 1 USD = 1 USDT (`--coinbase-product`).
 
@@ -319,7 +319,7 @@ texto crudo (`parse_json_number8`, admite notación científica), nunca vía `f6
 
 * La conexión mantiene un espejo, aplica y recorta cada update y **solo emite si el CRC32
   coincide**; los niveles recortados salen como bajas explícitas. Ante una discrepancia deja
-  de emitir profundidad y re-suscribe. Contador contiguo por línea (regla `OkxRule`).
+  de emitir profundidad y re-suscribe. Standby caliente entre líneas (§6 sexies).
 * Precisión del par por REST (`AssetPairs`); sin ella el mercado no arranca (no se podría
   verificar el checksum). Par por defecto SOL/USD (11× el volumen de SOL/USDT; supuesto
   1 USD = 1 USDT en el libro unificado, `--kraken-symbol`).
@@ -328,6 +328,26 @@ Prueba en vivo (5 min): 0 fallos de checksum, 0 resyncs, 0 sin contabilizar, 0 t
 **Verificación independiente** (libro propio de otra conexión, comparado solo en instantes
 de `timestamp` único para evitar estados intermedios): **101/101** idénticos. Con los cuatro
 venues activos: 6 mercados, 5 en vivo (Binance perp bloqueado por región en este entorno).
+
+## 6 sexies. Standby caliente de profundidad (Coinbase, Kraken) — 2026-09-26
+
+Problema: sin ids comparables entre conexiones no hay arbitraje A/B; con una sola línea de
+profundidad, su caída dejaba el libro **congelado pero marcado Live** hasta un timeout.
+
+* `lu_net::DepthLeader` (uno por mercado, compartido por sus líneas): liderazgo único y
+  contador de ids global y contiguo. Cada línea mantiene y valida su propio espejo
+  (secuencia por conexión en Coinbase, CRC32 en Kraken); solo la líder emite.
+* Pierde el liderazgo la línea que se cae (`Protocol::on_disconnect`), detecta un hueco o
+  falla el checksum. Un pedido de snapshot del motor lo deja vacante (`vacate`).
+* La primera línea válida que encuentra el liderazgo vacante lo asume y emite
+  `MarketEvent::Reset` con su libro **completo**; después, diffs encadenados por `prev`.
+* `SyncBook::on_reset` reemplaza el libro sin esperar timeout (motivo `venue_reset`); en
+  frío es la instalación normal. Pruebas: `lu-book` (reset reemplaza el libro),
+  `lu-net` (liderazgo único y relevo), `lu-coinbase` y `lu-kraken` (relevo con ids
+  contiguos y cada mensaje verificado publicado exactamente una vez).
+
+Prueba en vivo (`--venues coinbase,kraken --lines 2`): ambos libros Live, 0 resyncs,
+0 sin contabilizar.
 
 ## 6 quinquies. Bybit v5 (`lu-bybit`) — verificado en vivo 2026-09-26
 

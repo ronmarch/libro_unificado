@@ -14,9 +14,11 @@
 //!
 //! Diseño: la conexión mantiene un espejo del libro, aplica y recorta cada update y
 //! solo emite si el CRC32 coincide (incluyendo como bajas los niveles recortados). Ante
-//! una discrepancia deja de emitir profundidad y re-suscribe. La profundidad se numera
-//! con un contador contiguo por línea (regla `OkxRule`). Solo la línea 0 alimenta el
-//! libro; las demás aportan trades (deduplicados por `trade_id`).
+//! una discrepancia deja de emitir profundidad y re-suscribe. **Standby en caliente**:
+//! todas las líneas verifican su propio libro, pero solo la líder (`DepthLeader`)
+//! publica; si falla o se desconecta, la primera línea válida asume y publica su libro
+//! como `MarketEvent::Reset`. Ids contiguos compartidos (regla `OkxRule`). Los trades
+//! llegan por todas las líneas (deduplicados por `trade_id`).
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

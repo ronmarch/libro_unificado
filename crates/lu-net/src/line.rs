@@ -43,6 +43,8 @@ pub trait Protocol: Send + Sync + 'static {
     }
     /// Parsea un frame de texto y agrega 0..n eventos a `out`.
     fn parse(&self, text: &str, rx: RxStamp, out: &mut Vec<MarketEvent>) -> Result<(), String>;
+    /// La conexión terminó (cualquier motivo): el estado de esta conexión deja de valer.
+    fn on_disconnect(&self) {}
     /// El protocolo detectó que el estado de ESTA conexión es inválido (p. ej. hueco en
     /// la secuencia por conexión) y pide un snapshot nuevo. Se consulta tras cada frame.
     fn take_resync(&self) -> bool {
@@ -247,6 +249,7 @@ pub async fn run_line(
                             }
                         }
                     };
+                    proto.on_disconnect();
                     sink.line_down(spec.line, reason);
                     if reason == "apagado" {
                         return;
@@ -284,5 +287,83 @@ pub async fn run_line(
             _ = tokio::time::sleep(wait) => {}
         }
         backoff = (backoff * 2).min(cap);
+    }
+}
+
+/// Liderazgo de profundidad entre las líneas redundantes de un mercado cuya secuencia es
+/// por conexión (Coinbase, Kraken): todas mantienen su propio estado verificado, pero solo
+/// la líder publica. Si la líder falla, la primera línea válida asume y publica su estado
+/// como `MarketEvent::Reset`. Los ids de profundidad son un contador compartido que nunca
+/// retrocede.
+#[derive(Debug, Default)]
+pub struct DepthLeader {
+    st: std::sync::Mutex<(Option<u8>, u64)>,
+}
+
+impl DepthLeader {
+    /// Nuevo liderazgo vacante.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+    /// ¿Es `line` la líder?
+    pub fn is_leader(&self, line: u8) -> bool {
+        self.st.lock().map(|s| s.0 == Some(line)).unwrap_or(false)
+    }
+    /// Asume el liderazgo si está vacante. `true` si `line` pasó a ser líder AHORA.
+    pub fn try_acquire(&self, line: u8) -> bool {
+        self.st
+            .lock()
+            .map(|mut s| {
+                if s.0.is_none() {
+                    s.0 = Some(line);
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false)
+    }
+    /// Deja el liderazgo si `line` lo tenía.
+    pub fn release(&self, line: u8) {
+        if let Ok(mut s) = self.st.lock() {
+            if s.0 == Some(line) {
+                s.0 = None;
+            }
+        }
+    }
+    /// Deja el liderazgo vacante sea quien sea (pedido de snapshot del motor).
+    pub fn vacate(&self) {
+        if let Ok(mut s) = self.st.lock() {
+            s.0 = None;
+        }
+    }
+    /// Siguiente id de profundidad.
+    pub fn next_id(&self) -> u64 {
+        self.st
+            .lock()
+            .map(|mut s| {
+                s.1 += 1;
+                s.1
+            })
+            .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DepthLeader;
+
+    #[test]
+    fn liderazgo_unico_y_relevo() {
+        let l = DepthLeader::new();
+        assert!(l.try_acquire(0));
+        assert!(!l.try_acquire(1), "una sola líder");
+        l.release(1); // no es líder: sin efecto
+        assert!(l.is_leader(0));
+        l.release(0);
+        assert!(l.try_acquire(1), "relevo");
+        l.vacate();
+        assert!(!l.is_leader(1));
+        assert_eq!((l.next_id(), l.next_id()), (1, 2));
     }
 }
