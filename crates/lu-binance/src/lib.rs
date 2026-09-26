@@ -7,13 +7,12 @@
 #![warn(missing_docs)]
 
 pub mod endpoints;
-pub mod line;
+pub mod proto;
 pub mod rest;
-pub mod tls;
 pub mod wire;
 
 pub use endpoints::Endpoints;
-pub use line::{run_line, FrameSink, LineSpec};
+pub use lu_net::{client_config, run_line, FrameSink, LineSpec, TlsError};
+pub use proto::BinanceProtocol;
 pub use rest::{RestClient, RestError};
-pub use tls::{client_config, TlsError};
 pub use wire::{parse_frame, parse_snapshot, WireError};

@@ -1,0 +1,53 @@
+# CI: toda invariante del sistema se verifica en cada push y PR.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  verificar:
+    name: fmt · clippy · tests · propiedades · caos
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formato
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (sin advertencias)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: Propiedades (estrés)
+        env:
+          PROPTEST_CASES: "5000"
+        run: |
+          cargo test -p lu-book --test prop_sync
+          cargo test -p lu-flow --test prop_flow
+          cargo test -p lu-metrics --test prop_metrics
+
+      - name: Compilar nodo (release)
+        run: cargo build --release -p lu-node
+
+      - name: Caos con exchange simulado (2 min, sin red)
+        run: deploy/chaos-sim.sh 2

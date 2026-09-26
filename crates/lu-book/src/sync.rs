@@ -41,6 +41,8 @@ pub enum ResyncReason {
     Crossed,
     /// Solicitud externa (operación manual).
     Manual,
+    /// El conector entregó un estado autoritativo nuevo (relevo de línea, reinicio del venue).
+    VenueReset,
 }
 
 impl ResyncReason {
@@ -52,6 +54,7 @@ impl ResyncReason {
             ResyncReason::InvalidSequence => "invalid_sequence",
             ResyncReason::Crossed => "crossed",
             ResyncReason::Manual => "manual",
+            ResyncReason::VenueReset => "venue_reset",
         }
     }
 }
@@ -126,6 +129,8 @@ pub struct SyncStats {
     pub resync_crossed: u64,
     /// Resyncs manuales.
     pub resync_manual: u64,
+    /// Resyncs por estado autoritativo del conector (relevo de línea).
+    pub resync_venue_reset: u64,
     /// Veces que se observó libro cruzado.
     pub crossed_seen: u64,
     /// Diffs descartados por desborde del buffer de sincronización.
@@ -150,6 +155,7 @@ impl SyncStats {
             + self.resync_invalid_sequence
             + self.resync_crossed
             + self.resync_manual
+            + self.resync_venue_reset
     }
 }
 
@@ -325,6 +331,23 @@ impl<R: SeqRule, O: BookObserver> SyncBook<R, O> {
         st
     }
 
+    /// Entrada: estado autoritativo del conector (p. ej. relevo de la línea líder, que
+    /// entrega el espejo que venía verificando por su cuenta). Reemplaza el libro: si
+    /// estaba `Live` se invalida la época (nunca se mezclan estados) y el snapshot queda
+    /// retenido hasta que un diff lo encadene, igual que un snapshot normal, sin pedir
+    /// otro ni esperar el timeout de hueco.
+    pub fn on_reset(&mut self, s: DepthSnapshot, now_ms: u64) -> Step {
+        let mut st = Step::default();
+        if self.phase == Phase::Live {
+            self.invalidate(ResyncReason::VenueReset, &mut st);
+        }
+        self.stats.snapshots_rx += 1;
+        self.snapshot_req_at = None;
+        self.held = Some(s);
+        self.try_install(now_ms, &mut st);
+        st
+    }
+
     /// Fuerza resync (operación manual).
     pub fn force_resync(&mut self, now_ms: u64) -> Step {
         let mut st = Step::default();
@@ -415,7 +438,7 @@ impl<R: SeqRule, O: BookObserver> SyncBook<R, O> {
             *c += 1;
         }
         st.applied += 1;
-        self.obs.on_diff_applied(d.first_id, d.last_id, ts);
+        self.obs.on_diff_applied(d);
         if self.book.is_crossed() {
             self.stats.crossed_seen += 1;
             if self.cfg.cross_policy == CrossPolicy::Resync {
@@ -485,12 +508,19 @@ impl<R: SeqRule, O: BookObserver> SyncBook<R, O> {
     }
 
     fn resync(&mut self, reason: ResyncReason, now_ms: u64, st: &mut Step) {
+        self.invalidate(reason, st);
+        self.request_snapshot(now_ms, st);
+    }
+
+    /// Pierde la sincronización sin pedir snapshot (el llamador decide cómo recuperarla).
+    fn invalidate(&mut self, reason: ResyncReason, st: &mut Step) {
         match reason {
             ResyncReason::GapTimeout => self.stats.resync_gap_timeout += 1,
             ResyncReason::PendingOverflow => self.stats.resync_pending_overflow += 1,
             ResyncReason::InvalidSequence => self.stats.resync_invalid_sequence += 1,
             ResyncReason::Crossed => self.stats.resync_crossed += 1,
             ResyncReason::Manual => self.stats.resync_manual += 1,
+            ResyncReason::VenueReset => self.stats.resync_venue_reset += 1,
         }
         st.resync = Some(reason);
         self.obs.on_invalidate(self.epoch, reason);
@@ -502,7 +532,6 @@ impl<R: SeqRule, O: BookObserver> SyncBook<R, O> {
         for (key, (d, _)) in std::mem::take(&mut self.pending) {
             self.buffer.insert(key, d);
         }
-        self.request_snapshot(now_ms, st);
     }
 
     fn request_snapshot(&mut self, now_ms: u64, st: &mut Step) {
@@ -559,6 +588,7 @@ mod tests {
         DepthSnapshot {
             last_update_id: id,
             limit: 1000,
+            rolling: false,
             bids: bids.iter().map(|&(p, q)| lv(p, q)).collect(),
             asks: asks.iter().map(|&(p, q)| lv(p, q)).collect(),
             exch_ts_ms: None,
@@ -691,6 +721,41 @@ mod tests {
         assert_eq!(s.phase(), Phase::Live);
         let st = s.on_diff(diff(100, 120, Some(100), &[], &[], 0), 2);
         assert_eq!(st.resync, Some(ResyncReason::InvalidSequence));
+    }
+
+    #[test]
+    fn reset_del_venue_reemplaza_el_libro_sin_esperar_timeout() {
+        use crate::seq::OkxRule;
+        let mut s: SyncBook<OkxRule> = SyncBook::new(OkxRule, SyncConfig::default(), ());
+        s.on_snapshot(snap(100, &[(99, 1)], &[(101, 1)]), 0);
+        s.on_diff(diff(101, 101, Some(100), &[(99, 2)], &[], 0), 1);
+        assert_eq!(s.phase(), Phase::Live);
+        // La línea líder falló; otra línea publica su estado verificado (id nuevo 500).
+        let st = s.on_reset(snap(500, &[(98, 7)], &[(102, 3)]), 10);
+        assert_eq!(st.resync, Some(ResyncReason::VenueReset));
+        assert!(
+            !st.need_snapshot,
+            "el reset ya trae el estado: no se pide snapshot"
+        );
+        assert_eq!(s.stats().resync_venue_reset, 1);
+        // El siguiente update encadenado instala el estado del reset de inmediato.
+        let st = s.on_diff(diff(501, 501, Some(500), &[(98, 8)], &[], 1), 11);
+        assert!(st.went_live);
+        assert_eq!(s.epoch(), 2);
+        assert_eq!(
+            s.book().qty_at(Side::Bid, Px::from_units(98)),
+            Qty::from_units(8)
+        );
+        assert_eq!(
+            s.book().qty_at(Side::Bid, Px::from_units(99)),
+            Qty::ZERO,
+            "el estado viejo se descarta"
+        );
+        assert_eq!(
+            s.book().qty_at(Side::Ask, Px::from_units(102)),
+            Qty::from_units(3)
+        );
+        assert_eq!(s.unaccounted(), 0);
     }
 
     #[test]

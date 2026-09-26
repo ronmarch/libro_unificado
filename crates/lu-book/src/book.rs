@@ -24,6 +24,7 @@ pub struct L2Book {
     bids: BTreeMap<Px, Qty>,
     asks: BTreeMap<Px, Qty>,
     coverage: Coverage,
+    rolling: bool,
 }
 
 impl L2Book {
@@ -37,6 +38,7 @@ impl L2Book {
         self.bids.clear();
         self.asks.clear();
         self.coverage = Coverage::default();
+        self.rolling = false;
     }
 
     /// Reemplaza el contenido por un snapshot y calcula la cobertura.
@@ -52,6 +54,7 @@ impl L2Book {
                 self.asks.insert(l.px, l.qty);
             }
         }
+        self.rolling = s.rolling;
         self.coverage = Coverage {
             bid_floor: (s.limit > 0 && s.bids.len() >= s.limit)
                 .then(|| s.bids.iter().map(|l| l.px).min())
@@ -130,17 +133,30 @@ impl L2Book {
         (self.bids.len(), self.asks.len())
     }
 
-    /// Cobertura garantizada por el último snapshot.
+    /// Cobertura garantizada. En libros top-N rodantes es dinámica: el peor nivel presente.
     pub fn coverage(&self) -> Coverage {
-        self.coverage
+        if self.rolling {
+            Coverage {
+                bid_floor: self.bids.first_key_value().map(|(p, _)| *p),
+                ask_ceiling: self.asks.last_key_value().map(|(p, _)| *p),
+            }
+        } else {
+            self.coverage
+        }
+    }
+
+    /// ¿Libro top-N rodante (cobertura dinámica)?
+    pub fn is_rolling(&self) -> bool {
+        self.rolling
     }
 
     /// ¿El precio cae en la región conocida del lado indicado?
     #[inline]
     pub fn is_covered(&self, side: Side, px: Px) -> bool {
+        let c = self.coverage();
         match side {
-            Side::Bid => self.coverage.bid_floor.is_none_or(|f| px >= f),
-            Side::Ask => self.coverage.ask_ceiling.is_none_or(|c| px <= c),
+            Side::Bid => c.bid_floor.is_none_or(|f| px >= f),
+            Side::Ask => c.ask_ceiling.is_none_or(|c| px <= c),
         }
     }
 }
@@ -176,6 +192,7 @@ mod tests {
         let s = DepthSnapshot {
             last_update_id: 1,
             limit: 2,
+            rolling: false,
             bids: vec![lv("100", "1"), lv("99", "1")],
             asks: vec![lv("101", "1")],
             exch_ts_ms: None,
@@ -190,5 +207,31 @@ mod tests {
         assert_eq!(b.best_bid().unwrap().0, Px::parse("100").unwrap());
         assert_eq!(b.best_ask().unwrap().0, Px::parse("101").unwrap());
         assert!(!b.is_crossed());
+    }
+
+    #[test]
+    fn cobertura_dinamica_en_libro_rodante() {
+        let s = DepthSnapshot {
+            last_update_id: 1,
+            limit: 400,
+            rolling: true,
+            bids: vec![lv("100", "1"), lv("99", "1")],
+            asks: vec![lv("101", "1"), lv("102", "1")],
+            exch_ts_ms: None,
+            rx: RxStamp::default(),
+        };
+        let mut b = L2Book::new();
+        b.load_snapshot(&s);
+        assert_eq!(b.coverage().bid_floor, Some(Px::parse("99").unwrap()));
+        // El venue borra el 99 (salió del top-N): el piso sube; el 98 no es "0", es desconocido.
+        b.set(Side::Bid, Px::parse("99").unwrap(), Qty::ZERO);
+        assert_eq!(b.coverage().bid_floor, Some(Px::parse("100").unwrap()));
+        assert!(!b.is_covered(Side::Bid, Px::parse("99.5").unwrap()));
+        b.set(
+            Side::Ask,
+            Px::parse("103").unwrap(),
+            Qty::parse("2").unwrap(),
+        );
+        assert_eq!(b.coverage().ask_ceiling, Some(Px::parse("103").unwrap()));
     }
 }

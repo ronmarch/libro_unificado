@@ -1,0 +1,43 @@
+# Reglas de alerta Prometheus para lu-node (F5).
+groups:
+  - name: libro-unificado
+    rules:
+      - alert: LibroNoSincronizado
+        expr: lu_book_live == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations: { summary: "{{ $labels.market }} sin libro en vivo más de 30 s" }
+      - alert: ConservacionDiffsRota
+        expr: lu_sync_unaccounted != 0
+        labels: { severity: critical }
+        annotations: { summary: "{{ $labels.market }}: diffs sin contabilizar (defecto)" }
+      - alert: ConservacionTradesRota
+        expr: lu_flow_unaccounted != 0
+        labels: { severity: critical }
+        annotations: { summary: "{{ $labels.market }}: trades sin contabilizar en F2 (defecto)" }
+      - alert: EspejoF2Distinto
+        expr: increase(lu_flow_mirror_mismatch_total[5m]) > 0
+        labels: { severity: critical }
+        annotations: { summary: "{{ $labels.market }}: espejo del alineador distinto del libro" }
+      - alert: ResyncsFrecuentes
+        expr: sum by (market) (increase(lu_sync_resync_total[1h])) > 3
+        labels: { severity: warning }
+        annotations: { summary: "{{ $labels.market }}: más de 3 resyncs por hora" }
+      - alert: MotorSaturado
+        expr: increase(lu_ingest_dropped_total[5m]) > 0
+        labels: { severity: critical }
+        annotations: { summary: "{{ $labels.market }}: cola del motor descartando eventos" }
+      - alert: TodasLasLineasCaidas
+        expr: sum by (market) (lu_line_up{stream="depth"}) == 0
+        for: 10s
+        labels: { severity: critical }
+        annotations: { summary: "{{ $labels.market }}: todas las líneas de profundidad caídas" }
+      - alert: LatenciaAlta
+        expr: lu_line_latency_ms{quantile="0.99",stream="depth"} > 250
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "{{ $labels.market }} línea {{ $labels.line }}: p99 > 250 ms" }
+      - alert: TradesTardiosF2
+        expr: increase(lu_flow_trades_total{state="late"}[15m]) > 10
+        labels: { severity: warning }
+        annotations: { summary: "{{ $labels.market }}: trades llegan tras cerrar su lote (subir marca de agua)" }

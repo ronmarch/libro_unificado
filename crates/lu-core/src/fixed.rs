@@ -90,6 +90,44 @@ pub fn parse_fixed8(s: &str) -> Result<i64, ParseFixedError> {
         .ok_or(ParseFixedError::Overflow)
 }
 
+/// Parseo exacto de un número JSON tal como viene en el texto (`120.56`, `5e-05`,
+/// `1.2E+2`, `0`) a escala 1e8. Algunos venues (Kraken v2) envían números JSON en vez
+/// de cadenas: se leen desde el texto crudo, jamás vía `f64`. Rechaza negativos y
+/// más de 8 decimales significativos.
+pub fn parse_json_number8(s: &str) -> Result<i64, ParseFixedError> {
+    let (mant, exp) = match s.find(['e', 'E']) {
+        Some(i) => {
+            let e = &s[i + 1..];
+            let e = e.strip_prefix('+').unwrap_or(e);
+            let v: i32 = e.parse().map_err(|_| ParseFixedError::InvalidChar)?;
+            (&s[..i], v)
+        }
+        None => (s, 0),
+    };
+    if mant.starts_with('-') {
+        return Err(ParseFixedError::Negative);
+    }
+    let (ip, fp) = mant.split_once('.').unwrap_or((mant, ""));
+    if ip.is_empty() && fp.is_empty() {
+        return Err(ParseFixedError::Empty);
+    }
+    if !ip.bytes().chain(fp.bytes()).all(|c| c.is_ascii_digit()) {
+        return Err(ParseFixedError::InvalidChar);
+    }
+    // valor = dígitos × 10^(exp − len(fp)); se desplaza el punto y se reutiliza el parser exacto.
+    let digits = format!("{ip}{fp}");
+    let point = ip.len() as i64 + i64::from(exp);
+    let text = if point <= 0 {
+        format!("0.{}{}", "0".repeat((-point) as usize), digits)
+    } else if point as usize >= digits.len() {
+        format!("{digits}{}", "0".repeat(point as usize - digits.len()))
+    } else {
+        let p = point as usize;
+        format!("{}.{}", &digits[..p], &digits[p..])
+    };
+    parse_fixed8(&text)
+}
+
 /// Formatea un entero escalado 1e8 como decimal mínimo (`12.5`, `3`, `0.00000001`).
 pub fn write_fixed8(v: i64, f: &mut impl fmt::Write) -> fmt::Result {
     let neg = v < 0;
@@ -266,6 +304,19 @@ mod tests {
             assert_eq!(out, s);
         }
         assert_eq!(Px::parse("150.10").unwrap().to_string(), "150.1");
+    }
+
+    #[test]
+    fn numeros_json_exactos() {
+        assert_eq!(parse_json_number8("120.56").unwrap(), 12_056_000_000);
+        assert_eq!(parse_json_number8("0").unwrap(), 0);
+        assert_eq!(parse_json_number8("5e-05").unwrap(), 5_000);
+        assert_eq!(parse_json_number8("1.2E+2").unwrap(), 12_000_000_000);
+        assert_eq!(parse_json_number8("43.55948512").unwrap(), 4_355_948_512);
+        assert_eq!(parse_json_number8("1e-8").unwrap(), 1);
+        assert_eq!(parse_json_number8("1e-9"), Err(ParseFixedError::Precision));
+        assert_eq!(parse_json_number8("-1"), Err(ParseFixedError::Negative));
+        assert_eq!(parse_json_number8("1x"), Err(ParseFixedError::InvalidChar));
     }
 
     #[test]

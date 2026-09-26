@@ -154,6 +154,7 @@ pub fn parse_snapshot(text: &str, limit: usize, rx: RxStamp) -> Result<DepthSnap
     Ok(DepthSnapshot {
         last_update_id: w.last_update_id,
         limit,
+        rolling: false,
         bids: w.bids,
         asks: w.asks,
         exch_ts_ms: w.event_time,

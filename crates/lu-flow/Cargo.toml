@@ -1,0 +1,14 @@
+[package]
+name = "lu-flow"
+description = "F2: alineador determinista trades ↔ depth con marca de agua; cotas inferiores de liquidez no visible y cancelada"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+lu-core.workspace = true
+lu-book.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
