@@ -509,3 +509,52 @@ fn m4_cvd_marca_incompleto_fuera_de_cobertura() {
     assert!(!c.levels[1].complete, "99 contiene el piso de cobertura");
     assert!(!c.complete);
 }
+
+// ------------------------------------------------------------------- M5: CVD desde el libro exacto
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+    /// El CVD calculado desde el libro exacto (publicado cada 250 ms) coincide con el
+    /// calculado desde las métricas, incluida la marca de incompleto por cobertura.
+    #[test]
+    fn m5_cvd_desde_libro_igual_que_desde_metricas(
+        lv in prop::collection::vec((any::<bool>(), 0u16..2000, 1u8..50), 1..60),
+        limit in prop_oneof![Just(5000usize), 3usize..20],
+        ref_cents in 9_000i64..11_000,
+    ) {
+        let mut seen = std::collections::BTreeSet::new();
+        let levels: Vec<(Side, i64, i64)> = lv
+            .iter()
+            .filter_map(|&(b, o, q)| {
+                let (s, c) = if b { (Side::Bid, 9000 + i64::from(o)) } else { (Side::Ask, 11001 + i64::from(o)) };
+                seen.insert((b, c)).then_some((s, c, i64::from(q)))
+            })
+            .collect();
+        let mut bids = Vec::new();
+        let mut asks = Vec::new();
+        for &(s, c, q) in &levels {
+            let l = Level { px: px(c), qty: Qty::from_units(q) };
+            match s { Side::Bid => bids.push(l), Side::Ask => asks.push(l) }
+        }
+        bids.sort_by(|a, b| b.px.cmp(&a.px));
+        asks.sort_by(|a, b| a.px.cmp(&b.px));
+        let mut b = L2Book::new();
+        b.load_snapshot(&DepthSnapshot {
+            last_update_id: 1, limit, rolling: false, bids, asks, exch_ts_ms: None, rx: RxStamp::default(),
+        });
+        let mut m = Metrics::new(MetricsConfig::default());
+        m.on_rebuild(1, &b);
+        batch(&mut m, T0 + 5, &[], false);
+        let view = m.view(0);
+        let w = Px::from_units(1);
+        let rp = px(ref_cents);
+        let a = lu_metrics::book_cvd_depths(
+            &[&lu_metrics::BucketDepth::from_metrics(&view)], &[], rp, w, 5);
+        let d = lu_metrics::BucketDepth::from_book(&b, w, rp.bucket(w), 12, T0 + 5);
+        let c = lu_metrics::book_cvd_depths(&[&d], &[], rp, w, 5);
+        prop_assert_eq!(a.levels, c.levels);
+        prop_assert_eq!(a.complete, c.complete);
+        prop_assert_eq!(a.total, c.total);
+    }
+}

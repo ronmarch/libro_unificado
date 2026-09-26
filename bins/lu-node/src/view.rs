@@ -4,7 +4,7 @@
 use crate::flow::FlowView;
 use lu_book::{Coverage, Phase, SyncStats, MAX_LINES};
 use lu_core::{Px, Qty};
-use lu_metrics::MetricsView;
+use lu_metrics::{BucketDepth, MetricsView};
 use lu_telemetry::{LatencySummary, MetricType, PromWriter};
 use serde::Serialize;
 use std::sync::Arc;
@@ -117,6 +117,8 @@ pub struct BookView {
     pub levels: [usize; 2],
     /// Cobertura garantizada por el snapshot.
     pub coverage: Coverage,
+    /// Profundidad exacta por bucket de 1 USDT (medio ± 12), fuente del CVD del libro.
+    pub depth: BucketDepth,
     /// Tick/step del instrumento si se obtuvo `exchangeInfo`.
     pub tick: Option<Px>,
     /// Paso de cantidad.
@@ -165,6 +167,7 @@ impl BookView {
             top_asks: Vec::new(),
             levels: [0, 0],
             coverage: Coverage::default(),
+            depth: BucketDepth::default(),
             tick: None,
             step: None,
             off_tick_levels: 0,

@@ -429,6 +429,14 @@ impl<R: SeqRule> Engine<R> {
                 [b, a]
             },
             coverage: book.coverage(),
+            depth: match mid {
+                Some(m) if live => {
+                    let w = Px::from_units(1);
+                    // Vigente al publicar: un libro quieto sigue siendo actual aunque no cambie.
+                    lu_metrics::BucketDepth::from_book(book, w, m.bucket(w), 12, wall_ms)
+                }
+                _ => lu_metrics::BucketDepth::default(),
+            },
             tick: self.spec.as_ref().map(|s| s.tick),
             step: self.spec.as_ref().map(|s| s.step),
             off_tick_levels: self.off_tick,

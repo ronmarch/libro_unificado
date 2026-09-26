@@ -17,9 +17,11 @@
 //! Un par con algún bucket fuera de la cobertura del snapshot de cualquiera de los
 //! dos mercados se marca `complete = false` (la cantidad real puede ser mayor).
 
-use crate::footprint::{CellView, MetricsView};
+use crate::footprint::MetricsView;
+use lu_book::L2Book;
 use lu_core::{Px, Qty, Side};
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 /// Un par de niveles simétricos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -63,27 +65,84 @@ pub struct BookCvd {
     pub spot_ts_ms: u64,
     /// Último instante de exchange de la vista perp (ms).
     pub perp_ts_ms: u64,
-    /// Desfase entre ambas vistas (ms).
+    /// Desfase máximo entre las fuentes combinadas (ms de exchange).
     pub skew_ms: u64,
     /// Mercados sumados.
     pub markets: usize,
 }
 
-fn qty(v: &MetricsView, side: Side, bucket: i64) -> (i64, bool) {
-    let covered = match side {
-        Side::Bid => v.bid_floor_bucket.is_none_or(|f| bucket > f),
-        Side::Ask => v.ask_ceiling_bucket.is_none_or(|c| bucket < c),
-    };
-    let q = v
-        .current
-        .first()
-        .and_then(|c| {
-            c.cells
-                .iter()
-                .find(|x: &&CellView| x.side == side && x.bucket == bucket)
-        })
-        .map_or(0, |x| x.qty.raw());
-    (q, covered)
+/// Profundidad por bucket de un mercado en un instante: la fuente del CVD del libro.
+///
+/// Se construye desde el libro exacto (`from_book`, publicado junto al libro cada
+/// 250 ms, desfase mínimo entre venues) o desde las métricas (`from_metrics`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct BucketDepth {
+    /// Instante en que el estado era vigente (ms UNIX). Desde el libro: momento de
+    /// publicación (un libro quieto sigue vigente aunque su último cambio sea viejo);
+    /// desde las métricas: último instante de exchange procesado.
+    pub ts_ms: u64,
+    /// Bids por bucket.
+    pub bids: BTreeMap<i64, Qty>,
+    /// Asks por bucket.
+    pub asks: BTreeMap<i64, Qty>,
+    /// Bids en este bucket o por debajo: desconocidos (cobertura).
+    pub bid_floor_bucket: Option<i64>,
+    /// Asks en este bucket o por encima: desconocidos (cobertura).
+    pub ask_ceiling_bucket: Option<i64>,
+}
+
+impl BucketDepth {
+    /// Desde el libro exacto: buckets `centro ± radio` (suma exacta por bucket).
+    pub fn from_book(book: &L2Book, bucket: Px, center: i64, radius: i64, ts_ms: u64) -> Self {
+        let lo = Px::from_raw((center - radius) * bucket.raw());
+        let hi = Px::from_raw((center + radius + 1) * bucket.raw());
+        let mut d = BucketDepth {
+            ts_ms,
+            ..Default::default()
+        };
+        for (px, q) in book.bids().range(lo..hi) {
+            let e = d.bids.entry(px.bucket(bucket)).or_insert(Qty::ZERO);
+            *e = *e + *q;
+        }
+        for (px, q) in book.asks().range(lo..hi) {
+            let e = d.asks.entry(px.bucket(bucket)).or_insert(Qty::ZERO);
+            *e = *e + *q;
+        }
+        let cov = book.coverage();
+        d.bid_floor_bucket = cov.bid_floor.map(|p| p.bucket(bucket));
+        d.ask_ceiling_bucket = cov.ask_ceiling.map(|p| p.bucket(bucket));
+        d
+    }
+
+    /// Desde la vela en curso de las métricas (foto actual por bucket).
+    pub fn from_metrics(v: &MetricsView) -> Self {
+        let mut d = BucketDepth {
+            ts_ms: v.now_ms,
+            bid_floor_bucket: v.bid_floor_bucket,
+            ask_ceiling_bucket: v.ask_ceiling_bucket,
+            ..Default::default()
+        };
+        if let Some(c) = v.current.first() {
+            for x in c.cells.iter().filter(|x| x.qty.is_positive()) {
+                match x.side {
+                    Side::Bid => d.bids.insert(x.bucket, x.qty),
+                    Side::Ask => d.asks.insert(x.bucket, x.qty),
+                };
+            }
+        }
+        d
+    }
+
+    fn qty(&self, side: Side, bucket: i64) -> (i64, bool) {
+        let (map, covered) = match side {
+            Side::Bid => (&self.bids, self.bid_floor_bucket.is_none_or(|f| bucket > f)),
+            Side::Ask => (
+                &self.asks,
+                self.ask_ceiling_bucket.is_none_or(|c| bucket < c),
+            ),
+        };
+        (map.get(&bucket).map_or(0, |q| q.raw()), covered)
+    }
 }
 
 /// Calcula el CVD del libro con las velas en curso de un mercado spot y uno perp.
@@ -97,17 +156,32 @@ pub fn book_cvd(
     book_cvd_multi(&[spot], &[perp], ref_px, bucket, levels)
 }
 
-fn sum(views: &[&MetricsView], side: Side, bucket: i64) -> (i64, bool) {
-    views.iter().fold((0, true), |(q, c), v| {
-        let (q2, c2) = qty(v, side, bucket);
+/// CVD del libro sumando varios mercados spot y perp, desde las métricas.
+pub fn book_cvd_multi(
+    spots: &[&MetricsView],
+    perps: &[&MetricsView],
+    ref_px: Px,
+    bucket: Px,
+    levels: usize,
+) -> BookCvd {
+    let s: Vec<BucketDepth> = spots.iter().map(|v| BucketDepth::from_metrics(v)).collect();
+    let p: Vec<BucketDepth> = perps.iter().map(|v| BucketDepth::from_metrics(v)).collect();
+    let sr: Vec<&BucketDepth> = s.iter().collect();
+    let pr: Vec<&BucketDepth> = p.iter().collect();
+    book_cvd_depths(&sr, &pr, ref_px, bucket, levels)
+}
+
+fn sum(depths: &[&BucketDepth], side: Side, bucket: i64) -> (i64, bool) {
+    depths.iter().fold((0, true), |(q, c), d| {
+        let (q2, c2) = d.qty(side, bucket);
         (q + q2, c && c2)
     })
 }
 
-/// CVD del libro sumando varios mercados spot y perp (libro unificado multi-venue).
-pub fn book_cvd_multi(
-    spots: &[&MetricsView],
-    perps: &[&MetricsView],
+/// CVD del libro sumando varias fuentes de profundidad spot y perp (libro unificado).
+pub fn book_cvd_depths(
+    spots: &[&BucketDepth],
+    perps: &[&BucketDepth],
     ref_px: Px,
     bucket: Px,
     levels: usize,
@@ -139,18 +213,16 @@ pub fn book_cvd_multi(
             }
         })
         .collect();
+    let ts = spots.iter().chain(perps).map(|d| d.ts_ms);
     BookCvd {
         ref_px,
         ref_bucket: m,
         levels: lv,
         total: Qty::from_raw(cum),
         complete: all,
-        spot_ts_ms: spots.iter().map(|v| v.now_ms).min().unwrap_or(0),
-        perp_ts_ms: perps.iter().map(|v| v.now_ms).min().unwrap_or(0),
-        skew_ms: {
-            let ts = spots.iter().chain(perps).map(|v| v.now_ms);
-            ts.clone().max().unwrap_or(0) - ts.min().unwrap_or(0)
-        },
+        spot_ts_ms: spots.iter().map(|d| d.ts_ms).min().unwrap_or(0),
+        perp_ts_ms: perps.iter().map(|d| d.ts_ms).min().unwrap_or(0),
+        skew_ms: ts.clone().max().unwrap_or(0) - ts.min().unwrap_or(0),
         markets: spots.len() + perps.len(),
     }
 }

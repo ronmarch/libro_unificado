@@ -198,6 +198,10 @@ modelo (margen `2δ` de la marca de agua; frontera de lote ya podada).
   participa. Foto actual del libro; un par que toca la zona fuera de cobertura de
   cualquiera de los dos snapshots se marca incompleto. **Supuesto**: precio de referencia =
   precio medio spot; ambos libros deben estar `Live`; se informa el desfase entre vistas.
+  Fuente: `BucketDepth` exacta que cada motor publica con su libro cada 250 ms (medio ± 12
+  buckets). Desfase entre venues medido en vivo con los 5 exchanges: **219 ms medio, 257 ms
+  máximo** (antes ~1 s con las vistas de métricas). Propiedad **M5**: el CVD desde el libro
+  exacto es idéntico al CVD desde las métricas, incluida la marca de incompleto.
 
 Verificación (`crates/lu-metrics/tests/prop_metrics.rs`): **M1** TWA, tiempo observado y
 Σ ejecutado de toda vela cerrada coinciden **exactamente** con una integración por fuerza

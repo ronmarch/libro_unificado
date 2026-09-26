@@ -21,7 +21,7 @@ advertencias, tests, propiedades a 5 000 casos y 2 minutos de caos con el exchan
 
 
 ```bash
-cargo test --workspace                                              # 71 tests
+cargo test --workspace                                              # 73 tests
 PROPTEST_CASES=20000 cargo test -p lu-book --test prop_sync         # estrés (libro)
 PROPTEST_CASES=20000 cargo test -p lu-flow --test prop_flow         # estrés (F2)
 PROPTEST_CASES=20000 cargo test -p lu-metrics --test prop_metrics   # estrés (F3)
