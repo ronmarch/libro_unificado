@@ -266,6 +266,20 @@ La latencia depende de la ubicación del servidor; en la VM definitiva debe medi
 
 ---
 
+## 7 bis. Prueba en vivo con F2/F3 (2026-09-26, spot SOLUSDT, entorno con 451 en `api`/`stream`)
+
+| Métrica | Valor (5 min) |
+|---|---|
+| Estado | `Live`, época 1, 0 resyncs; 5009 / 4991 niveles; spread 0,82 bps |
+| Conservación diffs / trades | 0 / 0 sin contabilizar |
+| F2 | 376 trades alineados, **0 tardíos**, 0 ambiguos (δ = 0), 9845 flujos limpios, ≤ 4 lotes abiertos |
+| Cierre de lotes | 659 por marca de agua de trades, 1866 por tiempo de depth (trades quietos) |
+| F3 | 5 ventanas de muro evaluadas, 0 disparos |
+| Líneas | `stream.binance.com` responde 451 ⇒ la línea A rota sola a `data-stream.binance.vision`; arbitraje A/B activo (B primero 505, A primero 24; duplicados descartados) |
+
+Cambios surgidos de la prueba: la línea A usa el puerto 443 (los proxies suelen bloquear
+9443) y cada línea rota a un host alternativo ante HTTP 451/403 o 3 fallos seguidos.
+
 ## 8. Límites conocidos
 
 * La latencia medida incluye el desfase de reloj local: usar **chrony**.

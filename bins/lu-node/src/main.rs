@@ -321,8 +321,12 @@ fn main() {
                     StreamKind::Depth => format!("{label}/depth"),
                     StreamKind::Trade => format!("{label}/trade"),
                 };
+                let alt = match kind_s {
+                    StreamKind::Depth => ep.depth_fallbacks.get(li).cloned().unwrap_or_default(),
+                    StreamKind::Trade => Vec::new(),
+                };
                 rt.spawn(run_line(
-                    LineSpec::new(tag, li as u8, url.clone(), tls.clone()),
+                    LineSpec::new(tag, li as u8, url.clone(), tls.clone()).with_fallbacks(alt),
                     sink,
                     sd_rx.clone(),
                 ));

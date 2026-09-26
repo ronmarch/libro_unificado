@@ -34,6 +34,9 @@ pub struct LineSpec {
     pub line: u8,
     /// URL completa del stream combinado.
     pub url: String,
+    /// URLs alternativas (otro host, mismo stream). Ante un rechazo regional o de
+    /// acceso (HTTP 451/403) o 3 fallos seguidos, la línea rota a la siguiente.
+    pub fallback_urls: Vec<String>,
     /// Vida máxima de la conexión antes de rotarla.
     pub max_age: Duration,
     /// Silencio máximo tolerado antes de reconectar.
@@ -56,10 +59,19 @@ impl LineSpec {
             label: label.into(),
             line,
             url: url.into(),
+            fallback_urls: Vec::new(),
             max_age: Duration::from_secs(hours * 3600),
             idle_timeout: Duration::from_secs(10),
             tls,
         }
+    }
+}
+
+impl LineSpec {
+    /// Agrega URLs alternativas.
+    pub fn with_fallbacks(mut self, urls: Vec<String>) -> Self {
+        self.fallback_urls = urls;
+        self
     }
 }
 
@@ -76,17 +88,24 @@ pub async fn run_line(
     let base = Duration::from_millis(250);
     let cap = Duration::from_secs(30);
     let mut backoff = base;
+    let urls: Vec<String> = std::iter::once(spec.url.clone())
+        .chain(spec.fallback_urls.iter().cloned())
+        .collect();
+    let mut idx = 0usize;
+    let mut failures = 0u32;
     loop {
         if *shutdown.borrow() {
             return;
         }
-        tracing::info!(line = spec.line, label = %spec.label, url = %spec.url, "conectando");
+        let url = urls[idx].as_str();
+        tracing::info!(line = spec.line, label = %spec.label, url = %url, "conectando");
         let connector = Connector::Rustls(spec.tls.clone());
-        let connect = connect_async_tls_with_config(spec.url.as_str(), None, true, Some(connector));
+        let connect = connect_async_tls_with_config(url, None, true, Some(connector));
         match tokio::time::timeout(Duration::from_secs(10), connect).await {
             Ok(Ok((ws, _))) => {
                 sink.line_up(spec.line);
                 backoff = base;
+                failures = 0;
                 let (mut tx, mut rx) = ws.split();
                 let deadline = tokio::time::Instant::now() + spec.max_age;
                 let reason: &'static str = loop {
@@ -135,8 +154,24 @@ pub async fn run_line(
             Ok(Err(e)) => {
                 tracing::warn!(line = spec.line, label = %spec.label, error = %e, "fallo de conexión");
                 sink.line_down(spec.line, "fallo de conexión");
+                failures += 1;
+                let msg = e.to_string();
+                if urls.len() > 1 && (msg.contains("451") || msg.contains("403") || failures >= 3) {
+                    idx = (idx + 1) % urls.len();
+                    failures = 0;
+                    backoff = base;
+                    tracing::warn!(line = spec.line, label = %spec.label, url = %urls[idx], "rotando a host alternativo");
+                }
             }
-            Err(_) => sink.line_down(spec.line, "timeout de conexión"),
+            Err(_) => {
+                sink.line_down(spec.line, "timeout de conexión");
+                failures += 1;
+                if urls.len() > 1 && failures >= 3 {
+                    idx = (idx + 1) % urls.len();
+                    failures = 0;
+                    tracing::warn!(line = spec.line, label = %spec.label, url = %urls[idx], "rotando a host alternativo");
+                }
+            }
         }
         let wait = backoff + jitter(250);
         tokio::select! {
