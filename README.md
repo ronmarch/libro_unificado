@@ -16,6 +16,10 @@ Diseño completo: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Compilar y verificar
 
+El CI (`.github/workflows/ci.yml`) corre todo esto en cada push y PR: formato, clippy sin
+advertencias, tests, propiedades a 5 000 casos y 2 minutos de caos con el exchange simulado.
+
+
 ```bash
 cargo test --workspace                                              # 71 tests
 PROPTEST_CASES=20000 cargo test -p lu-book --test prop_sync         # estrés (libro)
