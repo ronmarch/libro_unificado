@@ -33,7 +33,7 @@ PROPTEST_CASES=20000 cargo test -p lu-metrics --test prop_metrics
 
 F0–F5 hechas para Binance (ver `ARCHITECTURE.md` §5 bis – §5 quinquies). Pendiente:
 
-1. **Venues restantes** (Bybit; perpetuos de Kraken vía Kraken Futures): seguir la plantilla de `crates/lu-okx`
+1. **Pendiente**: perpetuos de Kraken vía Kraken Futures (API aparte). Plantilla: seguir la plantilla de `crates/lu-okx`
    (`Protocol` de `lu-net` + `SeqRule` + `MarketEvent::Snapshot`). Capturar mensajes reales
    antes de escribir el parser; verificar contra snapshots independientes (ver §6 bis).
 2. Supuestos de F3 confirmados por el usuario (2026-09-26): R ≈ 1 = 0,8–1,25; alto = ≥ P90;

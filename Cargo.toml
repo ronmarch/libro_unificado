@@ -10,6 +10,7 @@ members = [
     "crates/lu-okx",
     "crates/lu-coinbase",
     "crates/lu-kraken",
+    "crates/lu-bybit",
     "crates/lu-telemetry",
     "bins/lu-node",
 ]
@@ -30,6 +31,7 @@ lu-binance = { path = "crates/lu-binance" }
 lu-okx = { path = "crates/lu-okx" }
 lu-coinbase = { path = "crates/lu-coinbase" }
 lu-kraken = { path = "crates/lu-kraken" }
+lu-bybit = { path = "crates/lu-bybit" }
 lu-telemetry = { path = "crates/lu-telemetry" }
 
 # externos (superficie mínima, sin aws-lc/cmake: TLS con ring para cross-compilar aarch64-musl)

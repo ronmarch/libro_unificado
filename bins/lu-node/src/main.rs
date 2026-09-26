@@ -21,6 +21,7 @@ use engine::{ChannelSink, Engine, EngineConfig, EngineMsg, IngestCounters, Strea
 use flow::FlowAgg;
 use lu_binance::{BinanceProtocol, Endpoints, RestClient};
 use lu_book::{BinanceFuturesRule, BinanceSpotRule, OkxRule, SeqRule, SyncBook, SyncConfig};
+use lu_bybit::BybitProtocol;
 use lu_coinbase::CoinbaseProtocol;
 use lu_core::{init_clock, MarketId, MarketKind, Qty, Venue};
 use lu_flow::{Aligner, AlignerConfig};
@@ -37,7 +38,7 @@ use view::Views;
 const USAGE: &str = "\
 uso: lu-node [opciones]
   --symbol SOLUSDT        símbolo (default SOLUSDT)
-  --venues binance        exchanges: binance,okx,coinbase,kraken (default binance)
+  --venues binance        exchanges: binance,okx,bybit,coinbase,kraken (default binance)
   --kraken-symbol SOL/USD par Kraken (solo spot; USD se suma como USDT)
   --coinbase-product SOL-USD  producto Coinbase (solo spot; USD se suma como USDT)
   --markets spot,perp     mercados a sincronizar (default spot,perp)
@@ -103,8 +104,9 @@ fn parse_args() -> Result<Args, String> {
                         "okx" => Ok(Venue::Okx),
                         "coinbase" => Ok(Venue::Coinbase),
                         "kraken" => Ok(Venue::Kraken),
+                        "bybit" => Ok(Venue::Bybit),
                         o => Err(format!(
-                            "venue no soportado aún: {o} (binance, okx, coinbase, kraken)"
+                            "venue no soportado aún: {o} (binance, okx, bybit, coinbase, kraken)"
                         )),
                     })
                     .collect::<Result<_, _>>()?
@@ -295,7 +297,7 @@ fn start_okx(
     tls: &Arc<rustls::ClientConfig>,
     tx: crossbeam_channel::Sender<EngineMsg>,
     counters: Arc<IngestCounters>,
-    mut req_rx: mpsc::UnboundedReceiver<()>,
+    req_rx: mpsc::UnboundedReceiver<()>,
     sd_rx: &watch::Receiver<bool>,
 ) {
     let Some(ep) = OkxEndpoints::new(&args.symbol, kind, args.lines) else {
@@ -360,35 +362,7 @@ fn start_okx(
             sd_rx.clone(),
         ));
     }
-    // Snapshots: cada suscripción ya trae uno; los pedidos del motor re-suscriben una línea.
-    let mut sd = sd_rx.clone();
-    rt.spawn(async move {
-        let start = tokio::time::Instant::now();
-        let mut last: Option<tokio::time::Instant> = None;
-        let mut next = 0usize;
-        loop {
-            tokio::select! {
-                _ = sd.changed() => return,
-                r = req_rx.recv() => if r.is_none() { return },
-            }
-            while req_rx.try_recv().is_ok() {}
-            // Las suscripciones iniciales ya entregan snapshot; no duplicar al arrancar.
-            if start.elapsed() < Duration::from_secs(3) {
-                continue;
-            }
-            if let Some(t) = last {
-                let el = t.elapsed();
-                if el < Duration::from_secs(1) {
-                    tokio::time::sleep(Duration::from_secs(1) - el).await;
-                }
-            }
-            last = Some(tokio::time::Instant::now());
-            if let Some(c) = cmd_txs.get(next % cmd_txs.len().max(1)) {
-                let _ = c.send(LineCmd::Resnapshot);
-            }
-            next += 1;
-        }
-    });
+    spawn_resnapshot(rt, cmd_txs, req_rx, sd_rx);
 }
 
 /// Coinbase Advanced Trade: la línea 0 alimenta el libro (secuencia por conexión);
@@ -401,7 +375,7 @@ fn start_coinbase(
     tls: &Arc<rustls::ClientConfig>,
     tx: crossbeam_channel::Sender<EngineMsg>,
     counters: Arc<IngestCounters>,
-    mut req_rx: mpsc::UnboundedReceiver<()>,
+    req_rx: mpsc::UnboundedReceiver<()>,
     sd_rx: &watch::Receiver<bool>,
 ) {
     let label = market.to_string();
@@ -434,24 +408,7 @@ fn start_coinbase(
             sd_rx.clone(),
         ));
     }
-    let mut sd = sd_rx.clone();
-    rt.spawn(async move {
-        let start = tokio::time::Instant::now();
-        loop {
-            tokio::select! {
-                _ = sd.changed() => return,
-                r = req_rx.recv() => if r.is_none() { return },
-            }
-            while req_rx.try_recv().is_ok() {}
-            if start.elapsed() < Duration::from_secs(3) {
-                continue; // la suscripción inicial ya trae snapshot
-            }
-            if let Some(c) = &depth_cmd {
-                let _ = c.send(LineCmd::Resnapshot);
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    });
+    spawn_resnapshot(rt, depth_cmd.into_iter().collect(), req_rx, sd_rx);
 }
 
 /// Kraken v2: precisión del par por REST (necesaria para el CRC32), línea 0 con libro
@@ -464,7 +421,7 @@ fn start_kraken(
     tls: &Arc<rustls::ClientConfig>,
     tx: crossbeam_channel::Sender<EngineMsg>,
     counters: Arc<IngestCounters>,
-    mut req_rx: mpsc::UnboundedReceiver<()>,
+    req_rx: mpsc::UnboundedReceiver<()>,
     sd_rx: &watch::Receiver<bool>,
 ) {
     let label = market.to_string();
@@ -525,9 +482,23 @@ fn start_kraken(
             sd_rx.clone(),
         ));
     }
+    spawn_resnapshot(rt, depth_cmd.into_iter().collect(), req_rx, sd_rx);
+}
+
+/// Snapshots por re-suscripción: cada suscripción inicial ya trae uno; los pedidos del
+/// motor (resync) re-suscriben una línea (round-robin), con intervalo mínimo de 1 s.
+fn spawn_resnapshot(
+    rt: &tokio::runtime::Runtime,
+    cmds: Vec<mpsc::UnboundedSender<LineCmd>>,
+    req_rx: mpsc::UnboundedReceiver<()>,
+    sd_rx: &watch::Receiver<bool>,
+) {
+    let mut req_rx = req_rx;
     let mut sd = sd_rx.clone();
     rt.spawn(async move {
         let start = tokio::time::Instant::now();
+        let mut last: Option<tokio::time::Instant> = None;
+        let mut next = 0usize;
         loop {
             tokio::select! {
                 _ = sd.changed() => return,
@@ -537,12 +508,63 @@ fn start_kraken(
             if start.elapsed() < Duration::from_secs(3) {
                 continue;
             }
-            if let Some(c) = &depth_cmd {
+            if let Some(t) = last {
+                let el = t.elapsed();
+                if el < Duration::from_secs(1) {
+                    tokio::time::sleep(Duration::from_secs(1) - el).await;
+                }
+            }
+            last = Some(tokio::time::Instant::now());
+            if let Some(c) = cmds.get(next % cmds.len().max(1)) {
                 let _ = c.send(LineCmd::Resnapshot);
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            next += 1;
         }
     });
+}
+
+/// Bybit v5: sin REST (el snapshot llega por WebSocket); `u` global ⇒ todas las líneas
+/// alimentan el libro con arbitraje A/B.
+#[allow(clippy::too_many_arguments)]
+fn start_bybit(
+    rt: &tokio::runtime::Runtime,
+    args: &Args,
+    market: MarketId,
+    tls: &Arc<rustls::ClientConfig>,
+    tx: crossbeam_channel::Sender<EngineMsg>,
+    counters: Arc<IngestCounters>,
+    req_rx: mpsc::UnboundedReceiver<()>,
+    sd_rx: &watch::Receiver<bool>,
+) {
+    let label = market.to_string();
+    let url = match market.kind {
+        MarketKind::Spot => lu_bybit::WS_SPOT,
+        MarketKind::Perp => lu_bybit::WS_LINEAR,
+    };
+    let mut cmds = Vec::new();
+    for li in 0..args.lines.max(1) {
+        let (ctx, crx) = mpsc::unbounded_channel();
+        cmds.push(ctx);
+        let sink: Arc<dyn FrameSink> = Arc::new(ChannelSink::new(
+            tx.clone(),
+            counters.clone(),
+            StreamKind::Depth,
+            label.clone(),
+        ));
+        rt.spawn(run_line(
+            LineSpec::new(
+                format!("{label}/orderbook+trades"),
+                li as u8,
+                url,
+                tls.clone(),
+            ),
+            Arc::new(BybitProtocol::new(args.symbol.clone())),
+            sink,
+            Some(crx),
+            sd_rx.clone(),
+        ));
+    }
+    spawn_resnapshot(rt, cmds, req_rx, sd_rx);
 }
 
 fn aligner() -> engine::Obs {
@@ -693,7 +715,7 @@ fn main() {
         };
         let handle = spawn(match (venue, kind) {
             // Coinbase usa un contador contiguo con `prev`: misma regla que OKX.
-            (Venue::Okx | Venue::Coinbase | Venue::Kraken, _) => Rule::Okx,
+            (Venue::Okx | Venue::Bybit | Venue::Coinbase | Venue::Kraken, _) => Rule::Okx,
             (_, MarketKind::Spot) => Rule::BinanceSpot,
             (_, MarketKind::Perp) => Rule::BinanceFutures,
         });
@@ -715,6 +737,16 @@ fn main() {
         }
 
         match venue {
+            Venue::Bybit => start_bybit(
+                &rt,
+                &args,
+                market.clone(),
+                &tls,
+                tx.clone(),
+                counters.clone(),
+                req_rx,
+                &sd_rx,
+            ),
             Venue::Kraken => start_kraken(
                 &rt,
                 &args,

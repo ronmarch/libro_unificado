@@ -6,8 +6,9 @@ exactos por venue y mercado, como base del libro unificado multi-exchange
 es un sistema de monitoreo, no de validación histórica.
 
 Estado: **F0 – F5 completas para Binance** (libro sincronizado, alineador F2, métricas F3,
-API WebSocket + UI F4, simulador con caos y soak F5). **OKX**, **Coinbase** y **Kraken** integrados y verificados
-en vivo (§6 bis – §6 quater). Pendiente: Bybit y perpetuos de Kraken (API Futures aparte).
+API WebSocket + UI F4, simulador con caos y soak F5). **Los 5 venues** (Binance, OKX, Bybit, Coinbase, Kraken)
+integrados y verificados en vivo (§6 bis – §6 quinquies). Pendiente: perpetuos de Kraken
+(API Kraken Futures aparte).
 
 ---
 
@@ -38,6 +39,7 @@ libro-unificado/
 ├── crates/lu-binance    conector Binance: endpoints, parseo zero-copy, REST
 ├── crates/lu-okx        conector OKX v5: books top-400 (snapshot por WS), trades, ctVal
 ├── crates/lu-coinbase   conector Coinbase Advanced Trade: level2 completo, secuencia por conexión
+├── crates/lu-bybit      conector Bybit v5: orderbook 1000 con u global, trades con RPI
 ├── crates/lu-kraken     conector Kraken v2: book top-1000 verificado por CRC32 en cada update
 └── bins/lu-node         nodo: motores, snapshots, API HTTP + WebSocket + UI, simulador y caos
 ```
@@ -322,6 +324,26 @@ Prueba en vivo (5 min): 0 fallos de checksum, 0 resyncs, 0 sin contabilizar, 0 t
 **Verificación independiente** (libro propio de otra conexión, comparado solo en instantes
 de `timestamp` único para evitar estados intermedios): **101/101** idénticos. Con los cuatro
 venues activos: 6 mercados, 5 en vivo (Binance perp bloqueado por región en este entorno).
+
+## 6 quinquies. Bybit v5 (`lu-bybit`) — verificado en vivo 2026-09-26
+
+Hallazgos (capturados): el REST responde 403 desde este entorno, pero el WebSocket entrega el
+snapshot (`orderbook.1000`), así que no se necesita REST. `u` es **contiguo y global**: 152/152
+deltas con el mismo `u` fueron idénticos en dos conexiones ⇒ arbitraje A/B real. `S` =
+**agresor** (112/112 contra el libro). Los trades traen `RPI` (ejecutado contra órdenes que no
+están en el libro) ⇒ se reporta aparte y no cuenta como consumo del libro (F2). El id de
+trade es numérico en spot y UUID en lineal ⇒ id de 64 bits por FNV-1a.
+
+* Ids = `(época << 44) | u`; un `u` que retrocede (reinicio del servicio, `u = 1`) abre una
+  época nueva ⇒ los ids nunca retroceden y el motor resincroniza. Regla `OkxRule`.
+* Snapshot nuevo por re-suscripción (round-robin entre líneas). Latido `{"op":"ping"}`.
+
+Prueba en vivo (5 min, spot + perp, 2 líneas): 0 resyncs, 0 sin contabilizar, 0 tardíos,
+0 errores; 44,5 SOL de RPI en spot reportados aparte. **Verificación independiente**:
+**22/22** snapshots frescos idénticos al libro publicado con el mismo `u`.
+
+Los 5 venues juntos (`--venues binance,okx,bybit,coinbase,kraken`): 8 mercados, 7 en vivo
+(Binance perp bloqueado por región en este entorno); el CVD unificado suma los 7.
 
 ## 7. Prueba en vivo (2026-09-25, binario release, servidor con 451 en `api` y `fapi`)
 

@@ -421,6 +421,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lu-bybit"
+version = "0.1.0"
+dependencies = [
+ "lu-core",
+ "lu-net",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lu-coinbase"
 version = "0.1.0"
 dependencies = [
@@ -497,6 +507,7 @@ dependencies = [
  "futures-util",
  "lu-binance",
  "lu-book",
+ "lu-bybit",
  "lu-coinbase",
  "lu-core",
  "lu-flow",

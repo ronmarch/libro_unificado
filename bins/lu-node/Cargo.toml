@@ -21,6 +21,7 @@ lu-net.workspace = true
 lu-okx.workspace = true
 lu-coinbase.workspace = true
 lu-kraken.workspace = true
+lu-bybit.workspace = true
 lu-telemetry.workspace = true
 serde.workspace = true
 serde_json.workspace = true
