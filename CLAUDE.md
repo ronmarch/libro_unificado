@@ -33,11 +33,12 @@ PROPTEST_CASES=20000 cargo test -p lu-metrics --test prop_metrics
 
 F0–F5 hechas para Binance (ver `ARCHITECTURE.md` §5 bis – §5 quinquies). Pendiente:
 
-1. **Venues 2–5** (OKX, Bybit, Coinbase, Kraken): crate `lu-<venue>` + `SeqRule`. Ojo: sus
-   feeds entregan el snapshot por el mismo WebSocket (no REST) y algunos validan con
-   checksum CRC32; puede requerir una variante de `SyncBook` por línea.
-2. Confirmar supuestos de táctica vs estructural ("≈ 1" = 0,8–1,25; "alto" = ≥ P90) y el
-   precio de referencia del CVD del libro (medio spot). Definiciones en `ARCHITECTURE.md` §5 ter.
+1. **Venues restantes** (Bybit, Coinbase, Kraken): seguir la plantilla de `crates/lu-okx`
+   (`Protocol` de `lu-net` + `SeqRule` + `MarketEvent::Snapshot`). Capturar mensajes reales
+   antes de escribir el parser; verificar contra snapshots independientes (ver §6 bis).
+   Kraken valida con CRC32 (activo): falta soporte de checksum en `SyncBook`.
+2. Supuestos de F3 confirmados por el usuario (2026-09-26): R ≈ 1 = 0,8–1,25; alto = ≥ P90;
+   referencia del CVD = medio spot; cantidades = foto actual.
 3. Soak de 72 h con Binance real en la VM (`deploy/soak.sh`) y calibrar δ de F2.
 
 Antes de tocar `lu-flow` o `lu-metrics`: `deploy/chaos-sim.sh 5` debe terminar OK.

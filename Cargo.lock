@@ -399,6 +399,7 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "lu-core",
+ "lu-net",
  "rustls",
  "serde",
  "serde_json",
@@ -449,6 +450,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lu-net"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "lu-core",
+ "rustls",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "webpki-roots 1.0.9",
+]
+
+[[package]]
 name = "lu-node"
 version = "0.1.0"
 dependencies = [
@@ -461,6 +476,8 @@ dependencies = [
  "lu-core",
  "lu-flow",
  "lu-metrics",
+ "lu-net",
+ "lu-okx",
  "lu-telemetry",
  "rustls",
  "serde",
@@ -469,6 +486,20 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "lu-okx"
+version = "0.1.0"
+dependencies = [
+ "lu-core",
+ "lu-net",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "ureq",
 ]
 
 [[package]]

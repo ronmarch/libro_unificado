@@ -36,6 +36,7 @@ fn book(levels: &[(Side, i64, i64)]) -> L2Book {
     b.load_snapshot(&DepthSnapshot {
         last_update_id: 1,
         limit: 5000,
+        rolling: false,
         bids,
         asks,
         exch_ts_ms: None,
@@ -451,6 +452,7 @@ fn view_of(levels: &[(Side, i64, i64)], limit: usize) -> lu_metrics::MetricsView
     b.load_snapshot(&DepthSnapshot {
         last_update_id: 1,
         limit,
+        rolling: false,
         bids,
         asks,
         exch_ts_ms: None,

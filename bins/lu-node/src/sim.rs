@@ -168,6 +168,7 @@ impl Truth {
         DepthSnapshot {
             last_update_id: self.last_id,
             limit: 5000,
+            rolling: false,
             bids: self.bids.iter().rev().map(lv).collect(),
             asks: self.asks.iter().map(lv).collect(),
             exch_ts_ms: Some(self.last_end_ms),
@@ -426,7 +427,7 @@ async fn line_task(
                 t.rx = RxStamp::now(line);
                 MarketEvent::Trade(t)
             }
-            MarketEvent::Ignored => MarketEvent::Ignored,
+            other => other,
         };
         if is_trade {
             trade.deliver(ev);

@@ -276,7 +276,7 @@ impl<R: SeqRule> Engine<R> {
             }
             EngineMsg::Event(MarketEvent::Trade(t)) => self.on_trade(t),
             EngineMsg::Event(MarketEvent::Ignored) | EngineMsg::Shutdown => {}
-            EngineMsg::Snapshot(s) => {
+            EngineMsg::Event(MarketEvent::Snapshot(s)) | EngineMsg::Snapshot(s) => {
                 tracing::info!(
                     market = %self.label,
                     last_update_id = s.last_update_id,

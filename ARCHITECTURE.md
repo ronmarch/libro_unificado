@@ -6,7 +6,8 @@ exactos por venue y mercado, como base del libro unificado multi-exchange
 es un sistema de monitoreo, no de validación histórica.
 
 Estado: **F0 – F5 completas para Binance** (libro sincronizado, alineador F2, métricas F3,
-API WebSocket + UI F4, simulador con caos y soak F5). Pendiente: venues 2–5.
+API WebSocket + UI F4, simulador con caos y soak F5). **OKX** integrado y verificado en vivo (§6 bis).
+Pendiente: Bybit, Coinbase, Kraken.
 
 ---
 
@@ -33,7 +34,9 @@ libro-unificado/
 ├── crates/lu-flow       F2: alineador trades ↔ depth, cotas inferiores por nivel y lote
 ├── crates/lu-metrics    F3: velas footprint (TWA perezoso) y detector de muros retirados
 ├── crates/lu-telemetry  histogramas HDR de latencia + escritor Prometheus
-├── crates/lu-binance    conector: endpoints, parseo zero-copy, REST, líneas WS, TLS
+├── crates/lu-net        TLS y líneas WebSocket redundantes genéricas por `Protocol`
+├── crates/lu-binance    conector Binance: endpoints, parseo zero-copy, REST
+├── crates/lu-okx        conector OKX v5: books top-400 (snapshot por WS), trades, ctVal
 └── bins/lu-node         nodo: motores, snapshots, API HTTP + WebSocket + UI, simulador y caos
 ```
 
@@ -246,6 +249,33 @@ resync provocado. El soak de 72 h queda para la VM definitiva.
   `data-api.binance.vision` / `data-stream.binance.vision`; **futuros no**.
 
 ---
+
+## 6 bis. OKX v5 (`lu-okx`) — verificado en vivo 2026-09-26
+
+Protocolo (capturado, no de memoria): canal `books` = snapshot por WebSocket (400 niveles,
+`prevSeqId = -1`) + updates cada 100 ms con `prevSeqId` = `seqId` anterior; `checksum` en 0
+(OKX ya no lo calcula ⇒ integridad solo por cadena de secuencia). Canal `trades`: agregado por
+orden taker (`side` = taker, `count` = fills). Perpetuo: `sz` en contratos × `ctVal` (1 SOL,
+leído por REST y aplicado en punto fijo exacto; sin `ctVal` el perpetuo no arranca).
+
+* **`OkxRule`**: puente `prevSeqId == seqId del snapshot`; cadena `prevSeqId == local`;
+  latido (`prevSeqId == seqId`) ⇒ `Stale`; `seqId` que retrocede ⇒ `Invalid` ⇒ resync. P1, P2,
+  P3 y el canario de vivacidad corren ahora también para OKX (20 000 casos).
+* **Libro top-400 rodante**: los niveles que salen del top llegan con tamaño 0. La cobertura
+  es **dinámica** (`DepthSnapshot::rolling`): más allá del peor nivel presente en cada
+  instante, el estado es desconocido. Muros, percentiles y CVD la respetan.
+* **Snapshot nuevo** (resync): re-suscripción al canal `books` en una línea (round-robin);
+  el REST de OKX no trae `seqId`. Latido de aplicación `"ping"` cada 20 s.
+* Líneas por el puerto 443 (`ws.okx.com`), alternativa `wsaws.okx.com:8443`.
+
+Prueba en vivo (5 min, spot + perp, 2 líneas): 0 resyncs, 0 diffs/trades sin contabilizar,
+0 tardíos, 0 errores; arbitraje A/B activo (perp: A primero 211, B primero 852).
+**Verificación independiente**: una conexión aparte pidió 98 snapshots frescos; en los 57
+cuyo `seqId` coincidió con una vista publicada por el nodo, el top 10 (precio y cantidad)
+fue **idéntico en 57/57**.
+
+Multi-venue: `--venues binance,okx` (rutas `binance.spot`, `okx.perp`, …). El CVD del libro
+suma spot y perp de todos los venues en vivo (libro unificado).
 
 ## 7. Prueba en vivo (2026-09-25, binario release, servidor con 451 en `api` y `fapi`)
 

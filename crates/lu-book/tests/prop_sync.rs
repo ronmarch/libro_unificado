@@ -11,7 +11,7 @@
 //! * **P3 — Conservación** (en cada paso de P1 y P2): todo diff recibido queda
 //!   contabilizado exactamente una vez (`unaccounted() == 0`).
 
-use lu_book::{BinanceFuturesRule, BinanceSpotRule, Phase, SeqRule, SyncBook, SyncConfig};
+use lu_book::{BinanceFuturesRule, BinanceSpotRule, OkxRule, Phase, SeqRule, SyncBook, SyncConfig};
 use lu_core::{DepthDiff, DepthSnapshot, Level, Px, Qty, RxStamp};
 use proptest::prelude::*;
 use std::collections::{BTreeMap, HashMap};
@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, HashMap};
 enum Kind {
     Spot,
     Futures,
+    Okx,
 }
 
 #[derive(Clone, Debug)]
@@ -102,8 +103,15 @@ fn build(kind: Kind, init: &[(bool, u8, u8)], evs: &[EvSpec]) -> World {
         let (first, pu) = match kind {
             Kind::Spot => (prev_u + 1, None),
             Kind::Futures => (prev_u + 1 + u64::from(e.skip), Some(prev_u)),
+            Kind::Okx => (prev_u + 1, Some(prev_u)),
         };
-        let last = first + u64::from(e.extra);
+        let last = first
+            + u64::from(e.extra)
+            + if kind == Kind::Okx {
+                u64::from(e.skip)
+            } else {
+                0
+            };
         let mut st = states[i].clone();
         let mut bids = Vec::new();
         let mut asks = Vec::new();
@@ -143,6 +151,7 @@ fn snapshot_of(w: &World, j: usize) -> DepthSnapshot {
     DepthSnapshot {
         last_update_id: w.ids[j],
         limit: 10_000,
+        rolling: false,
         bids: b.iter().map(|(p, q)| Level { px: *p, qty: *q }).collect(),
         asks: a.iter().map(|(p, q)| Level { px: *p, qty: *q }).collect(),
         exch_ts_ms: None,
@@ -153,7 +162,7 @@ fn snapshot_of(w: &World, j: usize) -> DepthSnapshot {
 /// Índice de snapshot puenteable: spot necesita un evento posterior; futuros puentea con el propio.
 fn clamp_snap(kind: Kind, j: usize, n: usize) -> usize {
     match kind {
-        Kind::Spot => j.min(n - 1),
+        Kind::Spot | Kind::Okx => j.min(n - 1),
         Kind::Futures => j.clamp(1, n),
     }
 }
@@ -310,6 +319,7 @@ fn run_case(
     match kind {
         Kind::Spot => simulate(BinanceSpotRule, kind, &w, specs, snap_j, snap_t, gap),
         Kind::Futures => simulate(BinanceFuturesRule, kind, &w, specs, snap_j, snap_t, gap),
+        Kind::Okx => simulate(OkxRule, kind, &w, specs, snap_j, snap_t, gap),
     }
 }
 
@@ -319,13 +329,13 @@ proptest! {
     /// P1: pérdidas en una sola línea nunca provocan resync y el libro final es exacto.
     #[test]
     fn p1_arbitraje_ab_exacto(
-        futures in any::<bool>(),
+        kind_sel in 0u8..3,
         init in prop::collection::vec((any::<bool>(), 0u8..40, 1u8..6), 0..30),
         specs in prop::collection::vec(ev_spec(), 2..60),
         snap_j in 0usize..60,
         snap_t in 50u64..800,
     ) {
-        let kind = if futures { Kind::Futures } else { Kind::Spot };
+        let kind = [Kind::Spot, Kind::Futures, Kind::Okx][kind_sel as usize];
         let n = specs.len();
         let out = run_case(kind, &init, &specs, snap_j % n, snap_t, None)?;
         prop_assert!(out.final_ok, "final incorrecto: fase {:?}, last {}", out.phase, out.last);
@@ -335,14 +345,14 @@ proptest! {
     /// P2: con un evento perdido en ambas líneas, jamás se expone un libro incorrecto como `Live`.
     #[test]
     fn p2_nunca_silenciosamente_incorrecto(
-        futures in any::<bool>(),
+        kind_sel in 0u8..3,
         init in prop::collection::vec((any::<bool>(), 0u8..40, 1u8..6), 0..30),
         specs in prop::collection::vec(ev_spec(), 3..60),
         snap_j in 0usize..60,
         snap_t in 50u64..800,
         gap_sel in 0usize..60,
     ) {
-        let kind = if futures { Kind::Futures } else { Kind::Spot };
+        let kind = [Kind::Spot, Kind::Futures, Kind::Okx][kind_sel as usize];
         let n = specs.len();
         let gap = 1 + gap_sel % n;
         // `run_case` verifica el invariante en cada paso; aquí solo exigimos que termine.
@@ -354,7 +364,7 @@ proptest! {
 /// y el libro se recupera exacto (garantiza que P2 ejercita la ruta de resync).
 #[test]
 fn canario_hueco_real_resync_y_recuperacion() {
-    for kind in [Kind::Spot, Kind::Futures] {
+    for kind in [Kind::Spot, Kind::Futures, Kind::Okx] {
         let specs: Vec<EvSpec> = (0..10)
             .map(|i| EvSpec {
                 changes: vec![(i % 2 == 0, (i * 3) as u8, (i % 5 + 1) as u8)],

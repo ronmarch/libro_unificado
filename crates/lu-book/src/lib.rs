@@ -15,7 +15,7 @@ pub mod sync;
 
 pub use book::{Coverage, L2Book};
 pub use observer::BookObserver;
-pub use seq::{BinanceFuturesRule, BinanceSpotRule, Class, SeqRule};
+pub use seq::{BinanceFuturesRule, BinanceSpotRule, Class, OkxRule, SeqRule};
 pub use sync::{
     CrossPolicy, Phase, ResyncReason, Step, SyncBook, SyncConfig, SyncStats, MAX_LINES,
 };

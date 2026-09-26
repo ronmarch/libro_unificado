@@ -559,6 +559,7 @@ mod tests {
         DepthSnapshot {
             last_update_id: id,
             limit: 1000,
+            rolling: false,
             bids: bids.iter().map(|&(p, q)| lv(p, q)).collect(),
             asks: asks.iter().map(|&(p, q)| lv(p, q)).collect(),
             exch_ts_ms: None,

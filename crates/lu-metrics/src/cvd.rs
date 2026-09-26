@@ -9,6 +9,9 @@
 //! El bucket `m` (mezcla bids y asks alrededor del precio) no participa.
 //! `cum_k = Σ_{j ≤ k} delta_j`; `total = cum_niveles`.
 //!
+//! Multi-venue: `bid_spot` es la suma de los bids spot de todos los venues (igual
+//! para perp y asks). El libro unificado suma la liquidez de todos los exchanges.
+//!
 //! Cantidades: foto actual del libro (cantidad visible en el bucket). Futuros
 //! Binance USDⓈ-M: 1 contrato = 1 unidad de base, sin conversión.
 //! Un par con algún bucket fuera de la cobertura del snapshot de cualquiera de los
@@ -62,6 +65,8 @@ pub struct BookCvd {
     pub perp_ts_ms: u64,
     /// Desfase entre ambas vistas (ms).
     pub skew_ms: u64,
+    /// Mercados sumados.
+    pub markets: usize,
 }
 
 fn qty(v: &MetricsView, side: Side, bucket: i64) -> (i64, bool) {
@@ -81,10 +86,28 @@ fn qty(v: &MetricsView, side: Side, bucket: i64) -> (i64, bool) {
     (q, covered)
 }
 
-/// Calcula el CVD del libro con las velas en curso de ambos mercados.
+/// Calcula el CVD del libro con las velas en curso de un mercado spot y uno perp.
 pub fn book_cvd(
     spot: &MetricsView,
     perp: &MetricsView,
+    ref_px: Px,
+    bucket: Px,
+    levels: usize,
+) -> BookCvd {
+    book_cvd_multi(&[spot], &[perp], ref_px, bucket, levels)
+}
+
+fn sum(views: &[&MetricsView], side: Side, bucket: i64) -> (i64, bool) {
+    views.iter().fold((0, true), |(q, c), v| {
+        let (q2, c2) = qty(v, side, bucket);
+        (q + q2, c && c2)
+    })
+}
+
+/// CVD del libro sumando varios mercados spot y perp (libro unificado multi-venue).
+pub fn book_cvd_multi(
+    spots: &[&MetricsView],
+    perps: &[&MetricsView],
     ref_px: Px,
     bucket: Px,
     levels: usize,
@@ -94,10 +117,10 @@ pub fn book_cvd(
     let mut all = true;
     let lv = (1..=levels as i64)
         .map(|k| {
-            let (bs, c1) = qty(spot, Side::Bid, m - k);
-            let (bp, c2) = qty(perp, Side::Bid, m - k);
-            let (as_, c3) = qty(spot, Side::Ask, m + k);
-            let (ap, c4) = qty(perp, Side::Ask, m + k);
+            let (bs, c1) = sum(spots, Side::Bid, m - k);
+            let (bp, c2) = sum(perps, Side::Bid, m - k);
+            let (as_, c3) = sum(spots, Side::Ask, m + k);
+            let (ap, c4) = sum(perps, Side::Ask, m + k);
             let delta = bs + bp - as_ - ap;
             cum += delta;
             let complete = c1 && c2 && c3 && c4;
@@ -122,8 +145,12 @@ pub fn book_cvd(
         levels: lv,
         total: Qty::from_raw(cum),
         complete: all,
-        spot_ts_ms: spot.now_ms,
-        perp_ts_ms: perp.now_ms,
-        skew_ms: spot.now_ms.abs_diff(perp.now_ms),
+        spot_ts_ms: spots.iter().map(|v| v.now_ms).min().unwrap_or(0),
+        perp_ts_ms: perps.iter().map(|v| v.now_ms).min().unwrap_or(0),
+        skew_ms: {
+            let ts = spots.iter().chain(perps).map(|v| v.now_ms);
+            ts.clone().max().unwrap_or(0) - ts.min().unwrap_or(0)
+        },
+        markets: spots.len() + perps.len(),
     }
 }

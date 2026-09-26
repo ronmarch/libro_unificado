@@ -10,7 +10,7 @@
 pub mod cvd;
 pub mod footprint;
 
-pub use cvd::{book_cvd, BookCvd, CvdLevel};
+pub use cvd::{book_cvd, book_cvd_multi, BookCvd, CvdLevel};
 pub use footprint::{
     CandleView, CellView, Liquidity, Metrics, MetricsConfig, MetricsView, TacticalConfig,
     WallConfig, WallRetired, WallStats, TF_15M, TF_1H, TF_4H,

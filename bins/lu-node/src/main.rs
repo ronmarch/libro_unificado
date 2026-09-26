@@ -1,4 +1,4 @@
-//! lu-node — nodo del libro unificado (F0+F1: Binance spot + USDⓈ-M).
+//! lu-node — nodo del libro unificado (Binance y OKX; spot y perpetuos).
 //!
 //! Topología de hilos:
 //! * `lu-io-*`   runtime Tokio: líneas WebSocket, REST, API HTTP.
@@ -19,11 +19,13 @@ mod ws;
 
 use engine::{ChannelSink, Engine, EngineConfig, EngineMsg, IngestCounters, StreamKind};
 use flow::FlowAgg;
-use lu_binance::{run_line, Endpoints, FrameSink, LineSpec, RestClient};
-use lu_book::{BinanceFuturesRule, BinanceSpotRule, SeqRule, SyncBook, SyncConfig};
-use lu_core::{init_clock, MarketId, MarketKind};
+use lu_binance::{BinanceProtocol, Endpoints, RestClient};
+use lu_book::{BinanceFuturesRule, BinanceSpotRule, OkxRule, SeqRule, SyncBook, SyncConfig};
+use lu_core::{init_clock, MarketId, MarketKind, Qty, Venue};
 use lu_flow::{Aligner, AlignerConfig};
 use lu_metrics::{Metrics, MetricsConfig};
+use lu_net::{run_line, FrameSink, LineCmd, LineSpec};
+use lu_okx::{OkxEndpoints, OkxProtocol};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +35,7 @@ use view::Views;
 const USAGE: &str = "\
 uso: lu-node [opciones]
   --symbol SOLUSDT        símbolo (default SOLUSDT)
+  --venues binance        exchanges: binance,okx (default binance)
   --markets spot,perp     mercados a sincronizar (default spot,perp)
   --lines 2               líneas redundantes por stream, 1..4 (default 2)
   --listen 127.0.0.1:9100 API de observabilidad
@@ -51,6 +54,7 @@ simulación y caos (F5; sin red):
 
 struct Args {
     symbol: String,
+    venues: Vec<Venue>,
     markets: Vec<MarketKind>,
     lines: usize,
     listen: SocketAddr,
@@ -64,6 +68,7 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
         symbol: "SOLUSDT".into(),
+        venues: vec![Venue::Binance],
         markets: vec![MarketKind::Spot, MarketKind::Perp],
         lines: 2,
         listen: "127.0.0.1:9100".parse().map_err(|e| format!("{e}"))?,
@@ -80,6 +85,16 @@ fn parse_args() -> Result<Args, String> {
         let mut val = || it.next().ok_or_else(|| format!("falta valor para {k}"));
         match k.as_str() {
             "--symbol" => a.symbol = val()?.to_uppercase(),
+            "--venues" => {
+                a.venues = val()?
+                    .split(',')
+                    .map(|v| match v.trim() {
+                        "binance" => Ok(Venue::Binance),
+                        "okx" => Ok(Venue::Okx),
+                        o => Err(format!("venue no soportado aún: {o} (binance, okx)")),
+                    })
+                    .collect::<Result<_, _>>()?
+            }
             "--markets" => {
                 a.markets = val()?
                     .split(',')
@@ -129,6 +144,13 @@ fn parse_args() -> Result<Args, String> {
     if a.markets.is_empty() {
         return Err("sin mercados".into());
     }
+    if a.venues.is_empty() {
+        return Err("sin venues".into());
+    }
+    if sim_on {
+        // El simulador reproduce las reglas de Binance.
+        a.venues = vec![Venue::Binance];
+    }
     a.sim = sim_on.then_some(sim_cfg);
     Ok(a)
 }
@@ -176,6 +198,183 @@ fn spawn_engine<R: SeqRule>(
             .run();
         })
         .expect("no se pudo crear el hilo del motor")
+}
+
+enum Rule {
+    BinanceSpot,
+    BinanceFutures,
+    Okx,
+}
+
+/// Binance: líneas WebSocket (la URL suscribe), snapshots REST y `exchangeInfo`.
+#[allow(clippy::too_many_arguments)]
+fn start_binance(
+    rt: &tokio::runtime::Runtime,
+    args: &Args,
+    kind: MarketKind,
+    tls: &Arc<rustls::ClientConfig>,
+    rest: &Arc<RestClient>,
+    tx: crossbeam_channel::Sender<EngineMsg>,
+    counters: Arc<IngestCounters>,
+    req_rx: mpsc::UnboundedReceiver<()>,
+    sd_rx: &watch::Receiver<bool>,
+) {
+    let ep = match kind {
+        MarketKind::Spot => Endpoints::spot(&args.symbol, args.lines),
+        MarketKind::Perp => Endpoints::usdm_perp(&args.symbol, args.lines),
+    };
+    let label = ep.market.to_string();
+    for (lines, kind_s) in [
+        (&ep.depth_lines, StreamKind::Depth),
+        (&ep.trade_lines, StreamKind::Trade),
+    ] {
+        for (li, url) in lines.iter().enumerate() {
+            let sink: Arc<dyn FrameSink> = Arc::new(ChannelSink::new(
+                tx.clone(),
+                counters.clone(),
+                kind_s,
+                label.clone(),
+            ));
+            let tag = match kind_s {
+                StreamKind::Depth => format!("{label}/depth"),
+                StreamKind::Trade => format!("{label}/trade"),
+            };
+            let alt = match kind_s {
+                StreamKind::Depth => ep.depth_fallbacks.get(li).cloned().unwrap_or_default(),
+                StreamKind::Trade => Vec::new(),
+            };
+            rt.spawn(run_line(
+                LineSpec::new(tag, li as u8, url.clone(), tls.clone()).with_fallbacks(alt),
+                Arc::new(BinanceProtocol),
+                sink,
+                None,
+                sd_rx.clone(),
+            ));
+        }
+    }
+    rt.spawn(snapshot::run(
+        ep.clone(),
+        rest.clone(),
+        req_rx,
+        tx.clone(),
+        sd_rx.clone(),
+    ));
+    // Reglas del instrumento: útiles (control de tick) pero no críticas.
+    let (rest2, ep2) = (rest.clone(), ep.clone());
+    rt.spawn(async move {
+        let (hosts, path, market) = (ep2.rest_hosts.clone(), ep2.exchange_info_path.clone(), ep2.market.clone());
+        match tokio::task::spawn_blocking(move || rest2.instrument(&hosts, &path, &market)).await {
+            Ok(Ok(spec)) => snapshot::deliver(&tx, EngineMsg::Spec(spec)).await,
+            Ok(Err(e)) => tracing::warn!(market = %ep2.market, error = %e, "exchangeInfo no disponible (se continúa sin control de tick)"),
+            Err(e) => tracing::warn!(error = %e, "tarea exchangeInfo abortada"),
+        }
+    });
+}
+
+/// OKX: reglas del instrumento (ctVal) por REST, líneas con suscripción y latido,
+/// y snapshots por re-suscripción (round-robin entre líneas).
+#[allow(clippy::too_many_arguments)]
+fn start_okx(
+    rt: &tokio::runtime::Runtime,
+    args: &Args,
+    kind: MarketKind,
+    tls: &Arc<rustls::ClientConfig>,
+    tx: crossbeam_channel::Sender<EngineMsg>,
+    counters: Arc<IngestCounters>,
+    mut req_rx: mpsc::UnboundedReceiver<()>,
+    sd_rx: &watch::Receiver<bool>,
+) {
+    let Some(ep) = OkxEndpoints::new(&args.symbol, kind, args.lines) else {
+        tracing::error!(symbol = %args.symbol, "símbolo no convertible a instId de OKX");
+        return;
+    };
+    let label = ep.market.to_string();
+    // ctVal es imprescindible en perpetuos: sin él las cantidades serían contratos, no SOL.
+    let mut spec = None;
+    for intento in 1..=3 {
+        match lu_okx::instrument(
+            tls.clone(),
+            &ep.rest_host,
+            ep.inst_type,
+            &ep.inst_id,
+            &ep.market,
+        ) {
+            Ok(s) => {
+                spec = Some(s);
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(market = %label, intento, error = %e, "instrumento OKX no disponible");
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        }
+    }
+    let contract = match (spec.as_ref(), kind) {
+        (Some((_, c)), _) => *c,
+        (None, MarketKind::Spot) => Qty::from_units(1),
+        (None, MarketKind::Perp) => {
+            tracing::error!(market = %label, "sin ctVal no se puede convertir contratos a SOL: mercado desactivado");
+            return;
+        }
+    };
+    if let Some((s, _)) = spec {
+        let tx2 = tx.clone();
+        rt.spawn(async move { snapshot::deliver(&tx2, EngineMsg::Spec(s)).await });
+    }
+    let proto = Arc::new(OkxProtocol::new(ep.inst_id.clone(), contract));
+    let mut cmd_txs = Vec::new();
+    for (li, url) in ep.lines.iter().enumerate() {
+        let (ctx, crx) = mpsc::unbounded_channel();
+        cmd_txs.push(ctx);
+        let sink: Arc<dyn FrameSink> = Arc::new(ChannelSink::new(
+            tx.clone(),
+            counters.clone(),
+            StreamKind::Depth,
+            label.clone(),
+        ));
+        rt.spawn(run_line(
+            LineSpec::new(
+                format!("{label}/books+trades"),
+                li as u8,
+                url.clone(),
+                tls.clone(),
+            )
+            .with_fallbacks(ep.fallbacks.get(li).cloned().unwrap_or_default()),
+            proto.clone(),
+            sink,
+            Some(crx),
+            sd_rx.clone(),
+        ));
+    }
+    // Snapshots: cada suscripción ya trae uno; los pedidos del motor re-suscriben una línea.
+    let mut sd = sd_rx.clone();
+    rt.spawn(async move {
+        let start = tokio::time::Instant::now();
+        let mut last: Option<tokio::time::Instant> = None;
+        let mut next = 0usize;
+        loop {
+            tokio::select! {
+                _ = sd.changed() => return,
+                r = req_rx.recv() => if r.is_none() { return },
+            }
+            while req_rx.try_recv().is_ok() {}
+            // Las suscripciones iniciales ya entregan snapshot; no duplicar al arrancar.
+            if start.elapsed() < Duration::from_secs(3) {
+                continue;
+            }
+            if let Some(t) = last {
+                let el = t.elapsed();
+                if el < Duration::from_secs(1) {
+                    tokio::time::sleep(Duration::from_secs(1) - el).await;
+                }
+            }
+            last = Some(tokio::time::Instant::now());
+            if let Some(c) = cmd_txs.get(next % cmd_txs.len().max(1)) {
+                let _ = c.send(LineCmd::Resnapshot);
+            }
+            next += 1;
+        }
+    });
 }
 
 fn aligner() -> engine::Obs {
@@ -249,12 +448,15 @@ fn main() {
     let mut registry: Vec<(String, Views)> = Vec::new();
     let mut engines = Vec::new();
 
-    for (i, kind) in args.markets.iter().copied().enumerate() {
-        let ep = match kind {
-            MarketKind::Spot => Endpoints::spot(&args.symbol, args.lines),
-            MarketKind::Perp => Endpoints::usdm_perp(&args.symbol, args.lines),
-        };
-        let label = ep.market.to_string();
+    let plan: Vec<(Venue, MarketKind)> = args
+        .venues
+        .iter()
+        .flat_map(|v| args.markets.iter().map(move |k| (*v, *k)))
+        .collect();
+    let multi_venue = args.venues.len() > 1;
+    for (i, (venue, kind)) in plan.into_iter().enumerate() {
+        let market = MarketId::new(venue, kind, args.symbol.clone());
+        let label = market.to_string();
         let (tx, rx) = crossbeam_channel::bounded::<EngineMsg>(65_536);
         let (req_tx, req_rx) = mpsc::unbounded_channel();
         let mut views = Views::new(label.clone());
@@ -264,12 +466,18 @@ fn main() {
             .map(|_| Arc::new(sim::SimStats::default()));
         views.sim = sim_stats.clone();
         let counters = Arc::new(IngestCounters::default());
-        registry.push((kind.as_str().to_string(), views.clone()));
+        // Clave de ruta: `spot`/`perp` con un venue (compatibilidad); `okx.perp` con varios.
+        let key = if multi_venue {
+            format!("{}.{}", venue.as_str(), kind.as_str())
+        } else {
+            kind.as_str().to_string()
+        };
+        registry.push((key, views.clone()));
 
         let core = cores.get(1 + i).copied();
-        let handle = match kind {
-            MarketKind::Spot => spawn_engine(
-                ep.market.clone(),
+        let spawn = |sync_rule: Rule| match sync_rule {
+            Rule::BinanceSpot => spawn_engine(
+                market.clone(),
                 SyncBook::new(BinanceSpotRule, SyncConfig::default(), aligner()),
                 rx,
                 req_tx,
@@ -278,8 +486,8 @@ fn main() {
                 rest.clone(),
                 core,
             ),
-            MarketKind::Perp => spawn_engine(
-                ep.market.clone(),
+            Rule::BinanceFutures => spawn_engine(
+                market.clone(),
                 SyncBook::new(BinanceFuturesRule, SyncConfig::default(), aligner()),
                 rx,
                 req_tx,
@@ -288,12 +496,27 @@ fn main() {
                 rest.clone(),
                 core,
             ),
+            Rule::Okx => spawn_engine(
+                market.clone(),
+                SyncBook::new(OkxRule, SyncConfig::default(), aligner()),
+                rx,
+                req_tx,
+                views.clone(),
+                counters.clone(),
+                rest.clone(),
+                core,
+            ),
         };
+        let handle = spawn(match (venue, kind) {
+            (Venue::Okx, _) => Rule::Okx,
+            (_, MarketKind::Spot) => Rule::BinanceSpot,
+            (_, MarketKind::Perp) => Rule::BinanceFutures,
+        });
         engines.push((tx.clone(), handle));
 
         if let (Some(cfg), Some(stats)) = (args.sim.clone(), sim_stats) {
             rt.spawn(sim::run(
-                ep.market.clone(),
+                market.clone(),
                 args.lines,
                 cfg,
                 tx.clone(),
@@ -306,51 +529,29 @@ fn main() {
             continue;
         }
 
-        for (lines, kind_s) in [
-            (&ep.depth_lines, StreamKind::Depth),
-            (&ep.trade_lines, StreamKind::Trade),
-        ] {
-            for (li, url) in lines.iter().enumerate() {
-                let sink: Arc<dyn FrameSink> = Arc::new(ChannelSink::new(
-                    tx.clone(),
-                    counters.clone(),
-                    kind_s,
-                    label.clone(),
-                ));
-                let tag = match kind_s {
-                    StreamKind::Depth => format!("{label}/depth"),
-                    StreamKind::Trade => format!("{label}/trade"),
-                };
-                let alt = match kind_s {
-                    StreamKind::Depth => ep.depth_fallbacks.get(li).cloned().unwrap_or_default(),
-                    StreamKind::Trade => Vec::new(),
-                };
-                rt.spawn(run_line(
-                    LineSpec::new(tag, li as u8, url.clone(), tls.clone()).with_fallbacks(alt),
-                    sink,
-                    sd_rx.clone(),
-                ));
-            }
+        match venue {
+            Venue::Okx => start_okx(
+                &rt,
+                &args,
+                kind,
+                &tls,
+                tx.clone(),
+                counters.clone(),
+                req_rx,
+                &sd_rx,
+            ),
+            _ => start_binance(
+                &rt,
+                &args,
+                kind,
+                &tls,
+                &rest,
+                tx.clone(),
+                counters.clone(),
+                req_rx,
+                &sd_rx,
+            ),
         }
-
-        rt.spawn(snapshot::run(
-            ep.clone(),
-            rest.clone(),
-            req_rx,
-            tx.clone(),
-            sd_rx.clone(),
-        ));
-
-        // Reglas del instrumento: útiles (control de tick) pero no críticas.
-        let (rest2, ep2, tx2) = (rest.clone(), ep.clone(), tx.clone());
-        rt.spawn(async move {
-            let (hosts, path, market) = (ep2.rest_hosts.clone(), ep2.exchange_info_path.clone(), ep2.market.clone());
-            match tokio::task::spawn_blocking(move || rest2.instrument(&hosts, &path, &market)).await {
-                Ok(Ok(spec)) => snapshot::deliver(&tx2, EngineMsg::Spec(spec)).await,
-                Ok(Err(e)) => tracing::warn!(market = %ep2.market, error = %e, "exchangeInfo no disponible (se continúa sin control de tick)"),
-                Err(e) => tracing::warn!(error = %e, "tarea exchangeInfo abortada"),
-            }
-        });
     }
 
     let registry: http::Registry = Arc::new(registry);
@@ -362,7 +563,8 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        tracing::info!(listen = %args.listen, "API: /health /ready /metrics /book/spot /book/perp");
+        let keys: Vec<&str> = registry.iter().map(|(k, _)| k.as_str()).collect();
+        tracing::info!(listen = %args.listen, mercados = ?keys, "API: / /ws /health /ready /metrics /cvd /book/<m> /footprint/<m>");
         let server = tokio::spawn(http::serve(listener, registry.clone(), sd_rx.clone()));
         wait_for_signal().await;
         tracing::info!("señal recibida: apagado ordenado");

@@ -338,6 +338,7 @@ pub struct Metrics {
     buckets: [BTreeMap<i64, i64>; 2],
     floor_bucket: Option<i64>,
     ceiling_bucket: Option<i64>,
+    rolling: bool,
     candles: Vec<Candle>,
     closed: Vec<VecDeque<Candle>>,
     wall_idx: Option<usize>,
@@ -369,6 +370,7 @@ impl Metrics {
             buckets: [BTreeMap::new(), BTreeMap::new()],
             floor_bucket: None,
             ceiling_bucket: None,
+            rolling: false,
             candles: Vec::new(),
             closed: (0..n).map(|_| VecDeque::new()).collect(),
             wall_idx,
@@ -407,10 +409,32 @@ impl Metrics {
         })
     }
 
+    /// Bucket del piso de cobertura de bids (dinámico en libros top-N rodantes).
+    fn floor(&self) -> Option<i64> {
+        if self.rolling {
+            self.levels[0]
+                .first_key_value()
+                .map(|(p, _)| p.bucket(self.cfg.bucket))
+        } else {
+            self.floor_bucket
+        }
+    }
+
+    /// Bucket del techo de cobertura de asks (dinámico en libros top-N rodantes).
+    fn ceiling(&self) -> Option<i64> {
+        if self.rolling {
+            self.levels[1]
+                .last_key_value()
+                .map(|(p, _)| p.bucket(self.cfg.bucket))
+        } else {
+            self.ceiling_bucket
+        }
+    }
+
     fn is_partial(&self, side: Side, b: i64) -> bool {
         match side {
-            Side::Bid => self.floor_bucket.is_some_and(|f| b <= f),
-            Side::Ask => self.ceiling_bucket.is_some_and(|c| b >= c),
+            Side::Bid => self.floor().is_some_and(|f| b <= f),
+            Side::Ask => self.ceiling().is_some_and(|c| b >= c),
         }
     }
 
@@ -916,8 +940,8 @@ impl Metrics {
                 .collect(),
             walls: self.walls.iter().copied().collect(),
             wall_stats: self.wall_stats.clone(),
-            bid_floor_bucket: self.floor_bucket,
-            ask_ceiling_bucket: self.ceiling_bucket,
+            bid_floor_bucket: self.floor(),
+            ask_ceiling_bucket: self.ceiling(),
         }
     }
 }
@@ -937,6 +961,7 @@ impl FlowSink for Metrics {
             book.asks().iter().map(|(p, q)| (*p, q.raw())).collect(),
         ];
         let cov = book.coverage();
+        self.rolling = book.is_rolling();
         self.floor_bucket = cov.bid_floor.map(|p| p.bucket(self.cfg.bucket));
         self.ceiling_bucket = cov.ask_ceiling.map(|p| p.bucket(self.cfg.bucket));
         self.live = true;

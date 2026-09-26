@@ -1,20 +1,16 @@
 [package]
-name = "lu-binance"
-description = "Conector Binance (spot + USDⓈ-M): parseo zero-copy, snapshots REST con control de peso y líneas WebSocket redundantes"
+name = "lu-net"
+description = "Red común a todos los venues: TLS y líneas WebSocket redundantes genéricas por protocolo"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
 lu-core.workspace = true
-lu-net.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 rustls.workspace = true
 webpki-roots.workspace = true
 futures-util.workspace = true
-ureq.workspace = true
 tracing.workspace = true

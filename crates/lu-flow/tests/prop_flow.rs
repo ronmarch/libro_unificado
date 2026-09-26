@@ -329,6 +329,7 @@ fn init_book(init: &[Lvl]) -> L2Book {
     b.load_snapshot(&DepthSnapshot {
         last_update_id: 999,
         limit: 5000,
+        rolling: false,
         bids,
         asks,
         exch_ts_ms: None,
@@ -503,6 +504,7 @@ fn contaminado_primer_lote_y_tardio_contado() {
     book.load_snapshot(&DepthSnapshot {
         last_update_id: 1,
         limit: 5000,
+        rolling: false,
         bids: vec![Level {
             px: Px::from_units(99),
             qty: Qty::from_units(10),
@@ -570,6 +572,7 @@ fn diffs_con_mismo_tiempo_se_fusionan_conservando_q0() {
     book.load_snapshot(&DepthSnapshot {
         last_update_id: 1,
         limit: 5000,
+        rolling: false,
         bids: vec![Level {
             px: Px::from_units(99),
             qty: Qty::from_units(10),
@@ -627,6 +630,7 @@ fn marca_de_agua_espera_a_todas_las_lineas_vivas() {
     b.load_snapshot(&DepthSnapshot {
         last_update_id: 1,
         limit: 5000,
+        rolling: false,
         bids: vec![Level {
             px: Px::from_units(99),
             qty: Qty::from_units(10),
