@@ -1,0 +1,12 @@
+[package]
+name = "lu-bybit"
+description = "Conector Bybit v5 (spot + perpetuo lineal): orderbook con u global contiguo, trades con RPI"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+lu-core.workspace = true
+lu-net.workspace = true
+serde.workspace = true
+serde_json.workspace = true

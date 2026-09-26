@@ -1,11 +1,35 @@
 //! Vistas inmutables publicadas por cada motor (lectura sin locks vía `ArcSwap`)
 //! y su exposición en Prometheus.
 
+use crate::flow::FlowView;
 use lu_book::{Coverage, Phase, SyncStats, MAX_LINES};
 use lu_core::{Px, Qty};
+use lu_metrics::MetricsView;
 use lu_telemetry::{LatencySummary, MetricType, PromWriter};
 use serde::Serialize;
 use std::sync::Arc;
+
+/// Vistas publicadas por un motor.
+#[derive(Clone)]
+pub struct Views {
+    /// Libro, líneas, sincronización y F2 (cada 250 ms).
+    pub book: Arc<arc_swap::ArcSwap<BookView>>,
+    /// F3: velas footprint y muros (cada 1 s).
+    pub metrics: Arc<arc_swap::ArcSwap<MetricsView>>,
+    /// Contadores del exchange simulado (`--sim`).
+    pub sim: Option<Arc<crate::sim::SimStats>>,
+}
+
+impl Views {
+    /// Vistas vacías.
+    pub fn new(market: String) -> Self {
+        Self {
+            book: Arc::new(arc_swap::ArcSwap::from_pointee(BookView::empty(market))),
+            metrics: Arc::new(arc_swap::ArcSwap::from_pointee(MetricsView::default())),
+            sim: None,
+        }
+    }
+}
 
 /// Nivel para presentación.
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -111,6 +135,8 @@ pub struct BookView {
     pub lines: Vec<LineView>,
     /// Trades.
     pub trades: TradeView,
+    /// F2: flujos alineados trades ↔ depth.
+    pub flow: FlowView,
     /// Eventos descartados por cola llena (fail-safe: fuerzan hueco ⇒ resync).
     pub ingest_dropped: u64,
     /// Frames no parseables.
@@ -153,6 +179,7 @@ impl BookView {
                 })
                 .collect(),
             trades: TradeView::default(),
+            flow: FlowView::default(),
             ingest_dropped: 0,
             parse_errors: 0,
             rest_weight_1m: 0,
@@ -409,6 +436,113 @@ pub fn render_prometheus(views: &[Arc<BookView>]) -> String {
             &l,
             v.trades.dup as f64,
         );
+        let f = &v.flow;
+        for (state, n) in [
+            ("aligned", f.stats.aligned),
+            ("contaminated", f.stats.contaminated),
+            ("late", f.stats.late),
+            ("syncing", f.stats.syncing),
+            ("overflow", f.stats.overflow),
+            ("invalidated", f.stats.invalidated),
+            ("duplicate", f.stats.duplicate),
+        ] {
+            w.sample(
+                "lu_flow_trades_total",
+                "trades por destino en el alineador F2",
+                Counter,
+                &[("market", m), ("state", state)],
+                n as f64,
+            );
+        }
+        w.sample(
+            "lu_flow_unaccounted",
+            "conservación de trades del alineador (debe ser 0)",
+            Gauge,
+            &l,
+            f.unaccounted as f64,
+        );
+        w.sample(
+            "lu_flow_open_batches",
+            "lotes abiertos esperando marca de agua",
+            Gauge,
+            &l,
+            f.open_batches as f64,
+        );
+        w.sample(
+            "lu_flow_mirror_mismatch_total",
+            "espejo del alineador distinto del libro (debe ser 0)",
+            Counter,
+            &l,
+            f.stats.mirror_mismatch as f64,
+        );
+        for (side, nv, cm, ex) in [
+            (
+                "bid",
+                f.totals.no_visible_min_bid,
+                f.totals.cancelado_min_bid,
+                f.totals.exec_bid,
+            ),
+            (
+                "ask",
+                f.totals.no_visible_min_ask,
+                f.totals.cancelado_min_ask,
+                f.totals.exec_ask,
+            ),
+        ] {
+            let sl = [("market", m), ("side", side)];
+            w.sample(
+                "lu_flow_exec_total",
+                "ejecutado alineado (sin RPI)",
+                Counter,
+                &sl,
+                ex.to_f64_lossy(),
+            );
+            w.sample(
+                "lu_flow_no_visible_min_total",
+                "Σ cota inferior de ejecutado no visible",
+                Counter,
+                &sl,
+                nv.to_f64_lossy(),
+            );
+            w.sample(
+                "lu_flow_cancelado_min_total",
+                "Σ cota inferior de cancelado",
+                Counter,
+                &sl,
+                cm.to_f64_lossy(),
+            );
+        }
+        let ws = &f.walls;
+        w.sample(
+            "lu_walls_evaluated_total",
+            "cruces bajo el umbral X evaluados",
+            Counter,
+            &l,
+            ws.evaluated as f64,
+        );
+        w.sample(
+            "lu_walls_retired_total",
+            "muros retirados detectados",
+            Counter,
+            &l,
+            ws.fired as f64,
+        );
+        for (reason, n) in [
+            ("percentile", ws.rejected_percentile),
+            ("distance", ws.rejected_distance),
+            ("exec", ws.rejected_exec),
+            ("contaminated", ws.rejected_contaminated),
+            ("coverage", ws.rejected_coverage),
+            ("no_mid", ws.rejected_no_mid),
+        ] {
+            w.sample(
+                "lu_walls_rejected_total",
+                "ventanas evaluadas y rechazadas",
+                Counter,
+                &[("market", m), ("reason", reason)],
+                n as f64,
+            );
+        }
         w.sample(
             "lu_ingest_dropped_total",
             "eventos descartados por cola llena",
@@ -430,6 +564,55 @@ pub fn render_prometheus(views: &[Arc<BookView>]) -> String {
             &l,
             f64::from(v.rest_weight_1m),
         );
+    }
+    w.finish()
+}
+
+/// Métricas del exchange simulado y del caos (solo con `--sim`).
+pub fn render_sim(reg: &[(String, Views)]) -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    use MetricType::Counter;
+    let mut w = PromWriter::new();
+    for (_, v) in reg {
+        let Some(s) = &v.sim else { continue };
+        let market = v.book.load().market.clone();
+        let m = market.as_str();
+        for (res, n) in [("ok", &s.checks_ok), ("mismatch", &s.checks_mismatch)] {
+            w.sample(
+                "lu_sim_checks_total",
+                "libro publicado vs verdad del simulador",
+                Counter,
+                &[("market", m), ("result", res)],
+                n.load(Relaxed) as f64,
+            );
+        }
+        for (name, help, n) in [
+            ("lu_sim_diffs_total", "diffs generados", &s.diffs),
+            ("lu_sim_trades_total", "trades generados", &s.trades),
+            (
+                "lu_chaos_dropped_total",
+                "eventos perdidos por caos",
+                &s.chaos_dropped,
+            ),
+            (
+                "lu_chaos_outages_total",
+                "cortes de línea provocados",
+                &s.chaos_outages,
+            ),
+            (
+                "lu_chaos_snapshot_fail_total",
+                "snapshots no entregados",
+                &s.chaos_snapshot_fail,
+            ),
+        ] {
+            w.sample(
+                name,
+                help,
+                Counter,
+                &[("market", m)],
+                n.load(Relaxed) as f64,
+            );
+        }
     }
     w.finish()
 }

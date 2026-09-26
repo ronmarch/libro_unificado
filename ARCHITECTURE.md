@@ -1,11 +1,14 @@
-# Libro Unificado — Arquitectura (F0 + F1)
+# Libro Unificado — Arquitectura (F0 – F5)
 
 Sistema **independiente de FORJA**. Mantiene en RAM, en tiempo real, libros L2
 exactos por venue y mercado, como base del libro unificado multi-exchange
 (Binance, OKX, Bybit, Coinbase, Kraken; spot y perpetuos). Sin almacenamiento:
 es un sistema de monitoreo, no de validación histórica.
 
-Estado: **F0 (fundaciones) y F1 (libro Binance spot + USDⓈ-M sincronizado) completas.**
+Estado: **F0 – F5 completas para Binance** (libro sincronizado, alineador F2, métricas F3,
+API WebSocket + UI F4, simulador con caos y soak F5). **Los 5 venues** (Binance, OKX, Bybit, Coinbase, Kraken)
+integrados y verificados en vivo (§6 bis – §6 quinquies). Pendiente: perpetuos de Kraken
+(API Kraken Futures aparte).
 
 ---
 
@@ -29,12 +32,19 @@ Estado: **F0 (fundaciones) y F1 (libro Binance spot + USDⓈ-M sincronizado) com
 libro-unificado/
 ├── crates/lu-core       tipos: Px/Qty punto fijo, MarketId, eventos normalizados, relojes
 ├── crates/lu-book       L2Book + SyncBook (máquina de estados) + SeqRule + BookObserver
+├── crates/lu-flow       F2: alineador trades ↔ depth, cotas inferiores por nivel y lote
+├── crates/lu-metrics    F3: velas footprint (TWA perezoso) y detector de muros retirados
 ├── crates/lu-telemetry  histogramas HDR de latencia + escritor Prometheus
-├── crates/lu-binance    conector: endpoints, parseo zero-copy, REST, líneas WS, TLS
-└── bins/lu-node         nodo: motores por mercado, snapshots, API HTTP
+├── crates/lu-net        TLS y líneas WebSocket redundantes genéricas por `Protocol`
+├── crates/lu-binance    conector Binance: endpoints, parseo zero-copy, REST
+├── crates/lu-okx        conector OKX v5: books top-400 (snapshot por WS), trades, ctVal
+├── crates/lu-coinbase   conector Coinbase Advanced Trade: level2 completo, secuencia por conexión
+├── crates/lu-bybit      conector Bybit v5: orderbook 1000 con u global, trades con RPI
+├── crates/lu-kraken     conector Kraken v2: book top-1000 verificado por CRC32 en cada update
+└── bins/lu-node         nodo: motores, snapshots, API HTTP + WebSocket + UI, simulador y caos
 ```
 
-Regla de dependencias: `lu-core` ← `lu-book` ← `lu-node`; `lu-core` ← `lu-binance` ← `lu-node`.
+Regla de dependencias: `lu-core` ← `lu-book` ← `lu-flow` ← `lu-metrics` ← `lu-node`; `lu-core` ← `lu-binance` ← `lu-node`.
 `lu-book` no conoce a ningún exchange concreto salvo por sus `SeqRule`.
 
 ---
@@ -106,6 +116,128 @@ Resultado: 31 tests (incluye 2 propiedades y 1 canario de vivacidad); estrés de
 
 ---
 
+## 5 bis. F2 — Alineador trades ↔ depth (`lu-flow`)
+
+El alineador es el `BookObserver` del `SyncBook` en cada motor; los trades
+(ya deduplicados A/B) entran por `Aligner::on_trade`. Determinista: tiempo del exchange.
+
+**Lote** = intervalo `(inicio, fin]` entre dos diffs aplicados. Tiempo del diff:
+`T` (futuros) o `E` (spot, no trae `T`). Diffs con el mismo tiempo se fusionan
+(se conserva el `q0` del primero). Por nivel y lote, con `e` = ejecutado sin RPI:
+
+| Salida | Fórmula | Es cota inferior de | Prueba |
+|---|---|---|---|
+| `no_visible_min` | `max(0, e_lo − q0)` | ejecutado que no estaba visible al inicio del lote (icebergs, ocultas, recargas) | de `q0` se consumió `c0 ≤ q0` |
+| `cancelado_min` | `max(0, q0 − e_hi − q1)` | cancelado en el lote | `q0 = c0 + k0 + s0`, `c0 ≤ e`, `s0 ≤ q1` |
+| `agregado_min` | `max(0, q1 − q0)` | agregado en el lote | balance del nivel |
+
+* **Incertidumbre temporal δ** (`boundary_slack_ms`, default 0 = especificación literal):
+  `e_lo` suma solo trades a más de δ de las fronteras; `e_hi` incluye los ambiguos de
+  ambos lotes vecinos. Las cotas siguen siendo válidas si `|T − tiempo real| ≤ δ`.
+* **Marca de agua por línea**: un lote cierra cuando existe uno posterior y **todas las
+  líneas vivas** entregaron un trade (único o duplicado) con `E > fin + 2δ` (orden por
+  socket), o el depth avanzó `fin + δ + 250 ms` (trades quietos). Una línea cuyo `E` queda
+  más de 1 s atrás de la más adelantada deja de frenar. Motivo: un trade perdido en la
+  línea rápida llega después por la lenta; con una marca global llegaba `late`
+  (observado en el simulador con caos: 3 tardíos → 0 tras el cambio).
+  Un trade cuyo lote ya cerró se cuenta `late` (no se re-emite).
+* **Épocas**: el primer lote tras un snapshot y todo lote abierto al perder la
+  sincronización son **contaminados**: `q0`/`q1` exactos, cotas en 0. Nunca se mezclan épocas.
+* **RPI**: `e` usa `nq`; `q − nq` se reporta aparte (`exec_rpi`).
+* **Conservación de trades**: `aligned + contaminated + late + syncing + overflow +
+  invalidated + duplicate + retenidos = recibidos` (`lu_flow_unaccounted` = 0).
+
+Verificación (`crates/lu-flow/tests/prop_flow.rs`) con un motor de matching sintético
+(FIFO con marca de lote por orden, icebergs que recargan, liquidez oscura, cancelaciones,
+RPI, socket de trades con latencia):
+
+| Propiedad | Contenido |
+|---|---|
+| F1 | cotas ≤ verdad; `q0`, `q1`, ejecutado y RPI exactos (δ = 0) |
+| F2 | cotas ≤ verdad con `T` desplazado hasta ±δ |
+| F3 | completitud: todo nivel con cambio o ejecución en lotes limpios se emite |
+| F4 | conservación en cada paso con resyncs, trades durante sync y tardíos |
+
+Prueba de mutación: invertir `e_lo`/`e_hi`, romper la resolución de `q0` o la fusión de
+diffs hace fallar las propiedades. Dos mutantes sobreviven por ser equivalentes bajo el
+modelo (margen `2δ` de la marca de agua; frontera de lote ya podada).
+
+## 5 ter. F3 — Métricas (`lu-metrics`)
+
+`Metrics` implementa `FlowSink`; el alineador lo alimenta junto con el resumen del nodo
+(`Aligner<(FlowAgg, Metrics)>`). Aritmética entera (`i128` para áreas `qty·ms`).
+
+* **Velas** 15 m / 1 h / 4 h alineadas a UTC, contiguas (un libro quieto también produce
+  velas). Por bucket de 1 USDT y lado: TWA, foto (cantidad al cierre), persistencia =
+  foto ÷ TWA, ejecutado (sin RPI), RPI aparte, fills, trades, Σ `no_visible_min`,
+  Σ `cancelado_min`, Σ `agregado_min`. Por vela: ejecutado comprador/vendedor y delta de trades.
+* **TWA perezoso**: `acc += qty_prev · Δt` solo al cambiar; el denominador es el tiempo con
+  libro sincronizado (las pausas por resync no se promedian). Un cambio se fecha al fin
+  de su lote. Vela iniciada a mitad o con pausa/lote contaminado: `clean = false`.
+* **Cobertura**: buckets que tocan `bid_floor`/`ask_ceiling` se marcan `partial` y no
+  entran al percentil. (Con un solo venue la banda es la del propio snapshot.)
+* **Muros retirados**: implementación exacta de §9 (P, X, N, Y como configuración con los
+  valores confirmados). Detalles de implementación: percentil de rango más cercano sobre
+  áreas de la vela 4 h en curso (mismo lado, dentro de cobertura); la ventana empieza
+  cuando el bucket estaba ≥ TWA justo antes de un cambio e incluye las ejecuciones de ese
+  lote; cada ventana se evalúa una vez, en el cruce; ventana con lote contaminado ⇒ rechazo.
+  Contadores de rechazo por causa.
+
+* **Táctica vs estructural** (definición del usuario, 2026-09-25): por bucket y lado,
+  `R = TWA 15 m ÷ TWA 4 h` con la vela de 4 h **anterior ya cerrada** como referencia
+  (opción B: la vela contenedora acota R ≤ 16 y vale 1 en el primer bloque). Lectura:
+  R > 1 táctica (candidata a spoof si luego se retira), R < 1 desarmándose (alimenta el
+  detector de muros), R ≈ 1 con TWA 4 h alto estructural, R ≈ 1 sin él estable; sin
+  liquidez en la referencia y con liquidez ahora ⇒ táctica (R = ∞). Sin vela de referencia
+  ⇒ sin lectura. **Supuestos a confirmar**: "≈ 1" = 0,8 ≤ R ≤ 1,25; "TWA 4 h alto" = ≥ P90
+  del lado en la vela de referencia (`TacticalConfig`). No confundir con la persistencia
+  (foto ÷ TWA dentro de la misma vela).
+* **CVD del libro** (definición del usuario, 2026-09-25): con `m` = bucket del precio,
+  `Δk = (bid spot + bid perp)(m−k) − (ask spot + ask perp)(m+k)` para k = 1..5, y su
+  acumulado. Ejemplo: precio 101 ⇒ bids 100 vs asks 102, 99 vs 103… El bucket `m` no
+  participa. Foto actual del libro; un par que toca la zona fuera de cobertura de
+  cualquiera de los dos snapshots se marca incompleto. **Supuesto**: precio de referencia =
+  precio medio spot; ambos libros deben estar `Live`; se informa el desfase entre vistas.
+
+Verificación (`crates/lu-metrics/tests/prop_metrics.rs`): **M1** TWA, tiempo observado y
+Σ ejecutado de toda vela cerrada coinciden **exactamente** con una integración por fuerza
+bruta, con cortes y reconstrucciones aleatorias; **M2** siete escenarios del detector
+(dispara; rechazos por ejecución en el borde exacto de 20 %, distancia, percentil,
+contaminación; sin cruce de X no evalúa; caída gradual acumula ejecuciones de la ventana);
+**M3** los tres ejemplos del usuario (2000→2100 estructural R 1,05; 300→1500 táctica R 5;
+2000→600 desarmándose R 0,3), estable y referencia vacía; **M4** CVD con el esquema
+100/102, 99/103… y marca de incompleto fuera de cobertura.
+Mutaciones de área, pausa, reanudación, percentil y ventana hacen fallar las pruebas.
+
+## 5 quater. F4 — API en vivo e interfaz
+
+* `GET /ws?markets=spot,perp&interval_ms=250`: `hello`, luego `book` (cada intervalo,
+  100..5000 ms) y `footprint` (cuando cambia, ≤ 1 Hz). Máximo 16 sesiones; mensajes de
+  entrada ≤ 64 KiB; un cliente que tarda > 2 s en recibir se desconecta (nunca frena al nodo).
+* `GET /cvd`: CVD del libro spot + perp (también por WebSocket, mensaje `cvd`).
+* `GET /footprint/<m>`: `MetricsView` (velas en curso, 12 cerradas por temporalidad, muros).
+* `GET /` o `/ui`: interfaz autocontenida (sin CDN): estado, escalera top 10, flujo F2,
+  footprint por temporalidad alrededor del precio medio, muros retirados y líneas A/B.
+  Modo claro/oscuro, apta para móvil, reconexión con backoff.
+
+## 5 quinquies. F5 — Simulador, caos y soak
+
+* `--sim`: exchange sintético con reglas de secuencia de Binance (spot contiguo; perp con
+  saltos y `pu`), lotes de 100 ms, límites, cancelaciones, barridos, icebergs, RPI en perp;
+  responde snapshots. Entrega al **motor real** por líneas redundantes.
+* Caos: `--chaos-drop` (pérdida por evento y línea), `--chaos-jitter-ms`,
+  `--chaos-outage-s` (cortes de 5–30 s), `--chaos-snapshot-fail`.
+* **P2 en vivo**: un verificador compara el top 10 publicado con la verdad del simulador en
+  el mismo `last_update_id` (`lu_sim_checks_total{result="mismatch"}` debe ser 0).
+* `deploy/soak.sh URL HORAS INTERVALO`: CSV + corte ante la primera violación de
+  invariantes. `deploy/chaos-sim.sh MIN SEMILLA`: caos reproducible sin red.
+  `deploy/alerts.yml`: reglas Prometheus.
+
+Resultado (2026-09-25, release, 2 min, 2 % de pérdida por línea, cortes, 10–20 % de
+snapshots fallidos): 758 verificaciones contra la verdad, **0 discrepancias**, 0 diffs y
+0 trades sin contabilizar, 0 tardíos, ~81 000 trades alineados, recuperación tras cada
+resync provocado. El soak de 72 h queda para la VM definitiva.
+
 ## 6. Hallazgos de la API de Binance (2025–2026) incorporados
 
 * **Futuros USDⓈ-M, WS dividido** desde 2026-03: `wss://fstream.binance.com/public/...`
@@ -121,6 +253,97 @@ Resultado: 31 tests (incluye 2 propiedades y 1 canario de vivacidad); estrés de
   `data-api.binance.vision` / `data-stream.binance.vision`; **futuros no**.
 
 ---
+
+## 6 bis. OKX v5 (`lu-okx`) — verificado en vivo 2026-09-26
+
+Protocolo (capturado, no de memoria): canal `books` = snapshot por WebSocket (400 niveles,
+`prevSeqId = -1`) + updates cada 100 ms con `prevSeqId` = `seqId` anterior; `checksum` en 0
+(OKX ya no lo calcula ⇒ integridad solo por cadena de secuencia). Canal `trades`: agregado por
+orden taker (`side` = taker, `count` = fills). Perpetuo: `sz` en contratos × `ctVal` (1 SOL,
+leído por REST y aplicado en punto fijo exacto; sin `ctVal` el perpetuo no arranca).
+
+* **`OkxRule`**: puente `prevSeqId == seqId del snapshot`; cadena `prevSeqId == local`;
+  latido (`prevSeqId == seqId`) ⇒ `Stale`; `seqId` que retrocede ⇒ `Invalid` ⇒ resync. P1, P2,
+  P3 y el canario de vivacidad corren ahora también para OKX (20 000 casos).
+* **Libro top-400 rodante**: los niveles que salen del top llegan con tamaño 0. La cobertura
+  es **dinámica** (`DepthSnapshot::rolling`): más allá del peor nivel presente en cada
+  instante, el estado es desconocido. Muros, percentiles y CVD la respetan.
+* **Snapshot nuevo** (resync): re-suscripción al canal `books` en una línea (round-robin);
+  el REST de OKX no trae `seqId`. Latido de aplicación `"ping"` cada 20 s.
+* Líneas por el puerto 443 (`ws.okx.com`), alternativa `wsaws.okx.com:8443`.
+
+Prueba en vivo (5 min, spot + perp, 2 líneas): 0 resyncs, 0 diffs/trades sin contabilizar,
+0 tardíos, 0 errores; arbitraje A/B activo (perp: A primero 211, B primero 852).
+**Verificación independiente**: una conexión aparte pidió 98 snapshots frescos; en los 57
+cuyo `seqId` coincidió con una vista publicada por el nodo, el top 10 (precio y cantidad)
+fue **idéntico en 57/57**.
+
+Multi-venue: `--venues binance,okx` (rutas `binance.spot`, `okx.perp`, …). El CVD del libro
+suma spot y perp de todos los venues en vivo (libro unificado).
+
+## 6 ter. Coinbase Advanced Trade (`lu-coinbase`) — verificado en vivo 2026-09-26
+
+Hallazgos (capturados): el feed Exchange sin autenticar degrada `level2` a **top 50 sin
+secuencia** ⇒ descartado. Advanced Trade (`level2`) entrega el libro **completo** (~13 000
+niveles, bids hasta 0,01) y `sequence_num` **por conexión**, contiguo y compartido por todos
+los canales. En `market_trades`, `side` es el lado del **maker** (43/43 `trade_id` idénticos
+al feed Exchange) ⇒ agresor = opuesto. Coinbase no tiene perpetuos en este exchange.
+
+* Cada conexión valida su propia continuidad; ante un hueco deja de emitir profundidad y
+  pide re-suscripción (`Protocol::take_resync`). La profundidad usa un contador sintético
+  contiguo por línea que nunca retrocede (regla `OkxRule`, encadenada por `prev`).
+* Sin arbitraje A/B de profundidad (ids no comparables entre conexiones): la línea 0 alimenta
+  el libro; las demás aportan trades (deduplicados por `trade_id`). Límite declarado.
+* **Supuesto declarado**: producto SOL-USD (SOL-USDT tiene ~0,6 % de su volumen); en el libro
+  unificado se suma con los libros en USDT tratando 1 USD = 1 USDT (`--coinbase-product`).
+
+Prueba en vivo (5 min): 0 resyncs, 0 sin contabilizar, 0 tardíos, 0 errores; 181 trades
+alineados (línea A primero 82, B 99). **Verificación independiente**: una conexión aparte
+reconstruyó su propio libro; en los 141 instantes de exchange comunes, el top 10 fue
+**idéntico en 141/141**. Con `--venues binance,okx,coinbase` el CVD suma los 4 mercados vivos.
+
+## 6 quater. Kraken v2 (`lu-kraken`) — verificado en vivo 2026-09-26
+
+Hallazgos (capturados): canal `book` **sin número de secuencia**; la integridad es el
+`checksum` CRC32 del top 10 tras cada mensaje (asks ascendentes + bids descendentes, precio y
+cantidad con la precisión del par, sin punto ni ceros a la izquierda). Algoritmo validado
+**1 945/1 945** sobre datos reales. Libro top-N: el cliente recorta tras cada update (Kraken no
+envía bajas de lo que sale del rango). Precios y cantidades como **números JSON** ⇒ se leen del
+texto crudo (`parse_json_number8`, admite notación científica), nunca vía `f64`. En `trade`,
+`side` = **agresor** (16/16; al revés que Coinbase). El 25 % de los updates comparte
+`timestamp` con otro (hasta 3): el alineador ya fusiona lotes del mismo instante.
+
+* La conexión mantiene un espejo, aplica y recorta cada update y **solo emite si el CRC32
+  coincide**; los niveles recortados salen como bajas explícitas. Ante una discrepancia deja
+  de emitir profundidad y re-suscribe. Contador contiguo por línea (regla `OkxRule`).
+* Precisión del par por REST (`AssetPairs`); sin ella el mercado no arranca (no se podría
+  verificar el checksum). Par por defecto SOL/USD (11× el volumen de SOL/USDT; supuesto
+  1 USD = 1 USDT en el libro unificado, `--kraken-symbol`).
+
+Prueba en vivo (5 min): 0 fallos de checksum, 0 resyncs, 0 sin contabilizar, 0 tardíos.
+**Verificación independiente** (libro propio de otra conexión, comparado solo en instantes
+de `timestamp` único para evitar estados intermedios): **101/101** idénticos. Con los cuatro
+venues activos: 6 mercados, 5 en vivo (Binance perp bloqueado por región en este entorno).
+
+## 6 quinquies. Bybit v5 (`lu-bybit`) — verificado en vivo 2026-09-26
+
+Hallazgos (capturados): el REST responde 403 desde este entorno, pero el WebSocket entrega el
+snapshot (`orderbook.1000`), así que no se necesita REST. `u` es **contiguo y global**: 152/152
+deltas con el mismo `u` fueron idénticos en dos conexiones ⇒ arbitraje A/B real. `S` =
+**agresor** (112/112 contra el libro). Los trades traen `RPI` (ejecutado contra órdenes que no
+están en el libro) ⇒ se reporta aparte y no cuenta como consumo del libro (F2). El id de
+trade es numérico en spot y UUID en lineal ⇒ id de 64 bits por FNV-1a.
+
+* Ids = `(época << 44) | u`; un `u` que retrocede (reinicio del servicio, `u = 1`) abre una
+  época nueva ⇒ los ids nunca retroceden y el motor resincroniza. Regla `OkxRule`.
+* Snapshot nuevo por re-suscripción (round-robin entre líneas). Latido `{"op":"ping"}`.
+
+Prueba en vivo (5 min, spot + perp, 2 líneas): 0 resyncs, 0 sin contabilizar, 0 tardíos,
+0 errores; 44,5 SOL de RPI en spot reportados aparte. **Verificación independiente**:
+**22/22** snapshots frescos idénticos al libro publicado con el mismo `u`.
+
+Los 5 venues juntos (`--venues binance,okx,bybit,coinbase,kraken`): 8 mercados, 7 en vivo
+(Binance perp bloqueado por región en este entorno); el CVD unificado suma los 7.
 
 ## 7. Prueba en vivo (2026-09-25, binario release, servidor con 451 en `api` y `fapi`)
 
@@ -141,6 +364,20 @@ La latencia depende de la ubicación del servidor; en la VM definitiva debe medi
 
 ---
 
+## 7 bis. Prueba en vivo con F2/F3 (2026-09-26, spot SOLUSDT, entorno con 451 en `api`/`stream`)
+
+| Métrica | Valor (5 min) |
+|---|---|
+| Estado | `Live`, época 1, 0 resyncs; 5009 / 4991 niveles; spread 0,82 bps |
+| Conservación diffs / trades | 0 / 0 sin contabilizar |
+| F2 | 376 trades alineados, **0 tardíos**, 0 ambiguos (δ = 0), 9845 flujos limpios, ≤ 4 lotes abiertos |
+| Cierre de lotes | 659 por marca de agua de trades, 1866 por tiempo de depth (trades quietos) |
+| F3 | 5 ventanas de muro evaluadas, 0 disparos |
+| Líneas | `stream.binance.com` responde 451 ⇒ la línea A rota sola a `data-stream.binance.vision`; arbitraje A/B activo (B primero 505, A primero 24; duplicados descartados) |
+
+Cambios surgidos de la prueba: la línea A usa el puerto 443 (los proxies suelen bloquear
+9443) y cada línea rota a un host alternativo ante HTTP 451/403 o 3 fallos seguidos.
+
 ## 8. Límites conocidos
 
 * La latencia medida incluye el desfase de reloj local: usar **chrony**.
@@ -155,10 +392,10 @@ La latencia depende de la ubicación del servidor; en la VM definitiva debe medi
 
 | Fase | Contenido |
 |---|---|
-| **F2** | Alineador trades ↔ depth con marca de agua (~250 ms). Por nivel consumido: `no_visible_min = max(0, e − q0)`, `cancelado_min = max(0, q0 − e − q1)`. |
-| **F3** | Métricas vía `BookObserver`: velas footprint 15 m / 1 h / 4 h por nivel de 1 USDT (CVD del libro, TWA perezoso `acc += qty_prev·Δt`, bid/ask ejecutado, n_fills, no visible), persistencia foto ÷ TWA, táctica vs estructural, muros retirados, RPI aparte. |
-| **F4** | API WebSocket y UI. |
-| **F5** | Soak test de 72 h + caos (cortes de línea, latencia inyectada, 429). |
+| ~~F2~~ | ✅ Alineador trades ↔ depth (§5 bis). Pendiente: medir en vivo `late`, `ambiguous` y calibrar δ. |
+| ~~F3~~ | ✅ Velas footprint, TWA, persistencia, muros retirados, táctica vs estructural y CVD del libro (§5 ter). |
+| ~~F4~~ | ✅ API WebSocket y UI (§5 quater). |
+| ~~F5~~ | ✅ Simulador, caos, soak y alertas (§5 quinquies). Pendiente: correr 72 h en la VM con Binance real. |
 | Venues 2–5 | OKX, Bybit, Coinbase, Kraken con la misma plantilla. SOLUSDC en modo sombra; SOLFDUSD excluido. |
 
 ### Detector de muros retirados (F3) — parámetros confirmados el 2026-09-25

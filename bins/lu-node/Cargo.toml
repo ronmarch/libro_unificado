@@ -12,7 +12,16 @@ path = "src/main.rs"
 [dependencies]
 lu-core.workspace = true
 lu-book.workspace = true
+lu-flow.workspace = true
+lu-metrics.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
 lu-binance.workspace = true
+lu-net.workspace = true
+lu-okx.workspace = true
+lu-coinbase.workspace = true
+lu-kraken.workspace = true
+lu-bybit.workspace = true
 lu-telemetry.workspace = true
 serde.workspace = true
 serde_json.workspace = true

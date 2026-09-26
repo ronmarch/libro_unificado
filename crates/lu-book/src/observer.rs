@@ -4,7 +4,7 @@
 
 use crate::book::L2Book;
 use crate::sync::ResyncReason;
-use lu_core::{Px, Qty, Side};
+use lu_core::{DepthDiff, Px, Qty, Side};
 
 /// Observador de cambios del libro sincronizado. Todos los métodos son opcionales.
 pub trait BookObserver {
@@ -13,8 +13,10 @@ pub trait BookObserver {
     fn on_level(&mut self, _side: Side, _px: Px, _prev: Qty, _new: Qty, _exch_ts_ms: u64) {}
 
     /// Un diff completo quedó aplicado (cierra lotes para el alineador trades↔depth).
+    /// Se entrega el diff completo: el alineador necesita `match_ts_ms` (`T`, futuros)
+    /// además de `exch_ts_ms` (`E`).
     #[inline]
-    fn on_diff_applied(&mut self, _first_id: u64, _last_id: u64, _exch_ts_ms: u64) {}
+    fn on_diff_applied(&mut self, _diff: &DepthDiff) {}
 
     /// Libro reconstruido desde snapshot: nueva época, todo estado derivado previo es inválido.
     #[inline]

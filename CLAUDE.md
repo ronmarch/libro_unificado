@@ -11,6 +11,8 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 PROPTEST_CASES=20000 cargo test -p lu-book --test prop_sync
+PROPTEST_CASES=20000 cargo test -p lu-flow --test prop_flow
+PROPTEST_CASES=20000 cargo test -p lu-metrics --test prop_metrics
 ```
 
 ## Invariantes que no se rompen
@@ -23,22 +25,22 @@ PROPTEST_CASES=20000 cargo test -p lu-book --test prop_sync
 4. **`lu-book` es determinista**: sin E/S, sin relojes, sin hilos. El tiempo se inyecta.
 5. **Nunca bloquear el runtime**: cola llena ⇒ descartar y contar (`try_send`).
 6. `#![forbid(unsafe_code)]` en todo el código propio.
+8. **Conservación de trades** en `lu-flow`: `Aligner::unaccounted() == 0` siempre.
+9. Las cotas de F2 son **inferiores**: toda fórmula nueva requiere prueba contra el simulador.
 7. Un cambio de lógica en `lu-book` requiere una prueba que falle antes del cambio.
 
-## Próximo paso: F2 — alineador trades ↔ depth
+## Estado y próximos pasos
 
-* Entradas: `AggTrade` (px, qty, `nq`, agresor, `T`, `agg_id`) y cambios de nivel vía
-  `BookObserver::on_level(side, px, prev, new, exch_ts)`.
-* Marca de agua ~250 ms sobre tiempo del exchange (en futuros, trades y depth llegan por sockets
-  distintos: no asumir orden).
-* Por nivel y lote de 100 ms, con `e` = ejecutado, `q0` = cantidad antes, `q1` = después:
-  `no_visible_min = max(0, e − q0)`, `cancelado_min = max(0, q0 − e − q1)`.
-  Son **cotas inferiores**, nunca estimaciones puntuales.
-* Futuros: comparar depth contra `nq` (sin RPI); reportar `q − nq` aparte.
-* Verificación: simulador de matching sintético (icebergs, cancelaciones, recargas)
-  con propiedad "las cotas nunca exceden la verdad".
-* Al cambiar de época (`on_invalidate`/`on_rebuild`) las métricas en curso se marcan
-  contaminadas; no se mezclan épocas.
+F0–F5 hechas para Binance (ver `ARCHITECTURE.md` §5 bis – §5 quinquies). Pendiente:
+
+1. **Pendiente**: perpetuos de Kraken vía Kraken Futures (API aparte). Plantilla: seguir la plantilla de `crates/lu-okx`
+   (`Protocol` de `lu-net` + `SeqRule` + `MarketEvent::Snapshot`). Capturar mensajes reales
+   antes de escribir el parser; verificar contra snapshots independientes (ver §6 bis).
+2. Supuestos de F3 confirmados por el usuario (2026-09-26): R ≈ 1 = 0,8–1,25; alto = ≥ P90;
+   referencia del CVD = medio spot; cantidades = foto actual.
+3. Soak de 72 h con Binance real en la VM (`deploy/soak.sh`) y calibrar δ de F2.
+
+Antes de tocar `lu-flow` o `lu-metrics`: `deploy/chaos-sim.sh 5` debe terminar OK.
 
 ## Reglas de trabajo
 

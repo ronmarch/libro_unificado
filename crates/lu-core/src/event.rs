@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Lado del libro.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Side {
     /// Compra (bid).
@@ -86,6 +86,10 @@ pub struct DepthSnapshot {
     pub last_update_id: u64,
     /// Límite de niveles solicitado (define la cobertura: si un lado trae `limit` niveles, está truncado).
     pub limit: usize,
+    /// Libro "top-N rodante" (OKX `books`): el venue mantiene solo los N mejores niveles y
+    /// borra los que salen del top. La cobertura es entonces dinámica: más allá del peor
+    /// nivel presente en cada momento, el estado es desconocido.
+    pub rolling: bool,
     /// Bids.
     pub bids: Vec<Level>,
     /// Asks.
@@ -141,6 +145,8 @@ pub enum MarketEvent {
     Depth(DepthDiff),
     /// Trade agregado.
     Trade(AggTrade),
+    /// Snapshot entregado por el propio stream (OKX, Bybit, Kraken: al suscribirse).
+    Snapshot(DepthSnapshot),
     /// Mensaje válido que este sistema no consume (p. ej. otros streams).
     Ignored,
 }

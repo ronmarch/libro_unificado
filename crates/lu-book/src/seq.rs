@@ -109,6 +109,51 @@ impl SeqRule for BinanceFuturesRule {
     }
 }
 
+/// OKX v5 canal `books` (snapshot por WebSocket + updates).
+///
+/// Verificado en vivo (2026-09-26): el snapshot trae `prevSeqId = -1` y su `seqId`;
+/// cada update trae `prevSeqId` = `seqId` del mensaje anterior (ids no contiguos).
+/// El conector mapea `first = prevSeqId + 1`, `last = seqId`, `prev = prevSeqId`.
+/// Un update sin cambios (latido) trae `prevSeqId == seqId` ⇒ `Stale`.
+/// Un `seqId` que retrocede (reinicio por mantenimiento) es `Invalid` ⇒ resync.
+/// El campo `checksum` llega en 0 (OKX dejó de calcularlo): la integridad descansa
+/// solo en la cadena de secuencia.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OkxRule;
+
+impl SeqRule for OkxRule {
+    const NAME: &'static str = "okx";
+
+    #[inline]
+    fn bridge(&self, _first: u64, last: u64, prev: Option<u64>, snap_id: u64) -> Class {
+        if last <= snap_id {
+            return Class::Stale;
+        }
+        match prev {
+            Some(pu) if pu == snap_id => Class::Next,
+            Some(pu) if pu > snap_id => Class::Ahead,
+            _ => Class::Invalid,
+        }
+    }
+
+    #[inline]
+    fn chain(&self, _first: u64, last: u64, prev: Option<u64>, local: u64) -> Class {
+        match prev {
+            Some(pu) if last < pu => Class::Invalid,
+            _ if last <= local => Class::Stale,
+            Some(pu) if pu == local => Class::Next,
+            Some(pu) if pu > local => Class::Ahead,
+            _ => Class::Invalid,
+        }
+    }
+
+    #[inline]
+    fn snapshot_too_old(&self, first_buffered: u64, snap_id: u64) -> bool {
+        // first_buffered = prev + 1 del diff más antiguo retenido.
+        snap_id + 1 < first_buffered
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +190,25 @@ mod tests {
         assert_eq!(r.chain(125, 130, None, 120), Class::Invalid);
         assert!(r.snapshot_too_old(101, 100));
         assert!(!r.snapshot_too_old(100, 100));
+    }
+
+    #[test]
+    fn okx_puente_y_cadena() {
+        let r = OkxRule;
+        // snapshot seqId 283; updates (prev, seq)
+        assert_eq!(r.bridge(250, 283, Some(249), 283), Class::Stale);
+        assert_eq!(r.bridge(284, 315, Some(283), 283), Class::Next);
+        assert_eq!(r.bridge(316, 328, Some(315), 283), Class::Ahead);
+        assert_eq!(r.bridge(270, 300, Some(269), 283), Class::Invalid);
+        // en vivo, local 315
+        assert_eq!(r.chain(316, 328, Some(315), 315), Class::Next);
+        assert_eq!(r.chain(316, 315, Some(315), 315), Class::Stale); // latido
+        assert_eq!(r.chain(284, 315, Some(283), 315), Class::Stale); // duplicado de otra línea
+        assert_eq!(r.chain(329, 340, Some(328), 315), Class::Ahead);
+        assert_eq!(r.chain(301, 320, Some(300), 315), Class::Invalid);
+        assert_eq!(r.chain(11, 10, Some(500), 315), Class::Invalid); // seqId retrocede
+        assert!(r.snapshot_too_old(316, 283 + 20));
+        assert!(!r.snapshot_too_old(284, 283));
+        assert!(r.snapshot_too_old(316, 283));
     }
 }

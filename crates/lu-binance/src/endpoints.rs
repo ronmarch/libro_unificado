@@ -16,6 +16,8 @@ pub struct Endpoints {
     pub depth_lines: Vec<String>,
     /// Líneas WebSocket redundantes de trades (solo futuros: otro endpoint).
     pub trade_lines: Vec<String>,
+    /// Por línea de profundidad: URLs alternativas (otros hosts) ante bloqueo o caída.
+    pub depth_fallbacks: Vec<Vec<String>>,
     /// Hosts REST en orden de preferencia (fallback ante bloqueo regional o caída).
     pub rest_hosts: Vec<String>,
     /// Ruta REST del snapshot de profundidad.
@@ -31,16 +33,23 @@ impl Endpoints {
     pub fn spot(symbol: &str, lines: usize) -> Self {
         let s = symbol.to_lowercase();
         let hosts = [
-            "wss://stream.binance.com:9443",
+            "wss://stream.binance.com:443",
             "wss://data-stream.binance.vision",
         ];
         let streams = format!("{s}@depth@100ms/{s}@aggTrade");
+        let url = |h: &str| format!("{h}/stream?streams={streams}");
+        let n = lines.max(1);
         Self {
             market: MarketId::new(Venue::Binance, MarketKind::Spot, symbol),
-            depth_lines: (0..lines.max(1))
-                .map(|i| format!("{}/stream?streams={streams}", hosts[i % hosts.len()]))
-                .collect(),
+            depth_lines: (0..n).map(|i| url(hosts[i % hosts.len()])).collect(),
             trade_lines: Vec::new(),
+            depth_fallbacks: (0..n)
+                .map(|i| {
+                    (1..hosts.len())
+                        .map(|j| url(hosts[(i + j) % hosts.len()]))
+                        .collect()
+                })
+                .collect(),
             rest_hosts: vec![
                 "https://api.binance.com".into(),
                 "https://data-api.binance.vision".into(),
@@ -63,6 +72,7 @@ impl Endpoints {
             trade_lines: (0..n)
                 .map(|_| format!("wss://fstream.binance.com/market/stream?streams={s}@aggTrade"))
                 .collect(),
+            depth_fallbacks: vec![Vec::new(); n],
             rest_hosts: vec!["https://fapi.binance.com".into()],
             snapshot_path: format!("/fapi/v1/depth?symbol={symbol}&limit=1000"),
             snapshot_limit: 1000,
