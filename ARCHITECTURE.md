@@ -6,8 +6,8 @@ exactos por venue y mercado, como base del libro unificado multi-exchange
 es un sistema de monitoreo, no de validación histórica.
 
 Estado: **F0 – F5 completas para Binance** (libro sincronizado, alineador F2, métricas F3,
-API WebSocket + UI F4, simulador con caos y soak F5). **OKX** y **Coinbase** integrados y verificados en vivo
-(§6 bis, §6 ter). Pendiente: Bybit, Kraken.
+API WebSocket + UI F4, simulador con caos y soak F5). **OKX**, **Coinbase** y **Kraken** integrados y verificados
+en vivo (§6 bis – §6 quater). Pendiente: Bybit y perpetuos de Kraken (API Futures aparte).
 
 ---
 
@@ -38,6 +38,7 @@ libro-unificado/
 ├── crates/lu-binance    conector Binance: endpoints, parseo zero-copy, REST
 ├── crates/lu-okx        conector OKX v5: books top-400 (snapshot por WS), trades, ctVal
 ├── crates/lu-coinbase   conector Coinbase Advanced Trade: level2 completo, secuencia por conexión
+├── crates/lu-kraken     conector Kraken v2: book top-1000 verificado por CRC32 en cada update
 └── bins/lu-node         nodo: motores, snapshots, API HTTP + WebSocket + UI, simulador y caos
 ```
 
@@ -298,6 +299,29 @@ Prueba en vivo (5 min): 0 resyncs, 0 sin contabilizar, 0 tardíos, 0 errores; 18
 alineados (línea A primero 82, B 99). **Verificación independiente**: una conexión aparte
 reconstruyó su propio libro; en los 141 instantes de exchange comunes, el top 10 fue
 **idéntico en 141/141**. Con `--venues binance,okx,coinbase` el CVD suma los 4 mercados vivos.
+
+## 6 quater. Kraken v2 (`lu-kraken`) — verificado en vivo 2026-09-26
+
+Hallazgos (capturados): canal `book` **sin número de secuencia**; la integridad es el
+`checksum` CRC32 del top 10 tras cada mensaje (asks ascendentes + bids descendentes, precio y
+cantidad con la precisión del par, sin punto ni ceros a la izquierda). Algoritmo validado
+**1 945/1 945** sobre datos reales. Libro top-N: el cliente recorta tras cada update (Kraken no
+envía bajas de lo que sale del rango). Precios y cantidades como **números JSON** ⇒ se leen del
+texto crudo (`parse_json_number8`, admite notación científica), nunca vía `f64`. En `trade`,
+`side` = **agresor** (16/16; al revés que Coinbase). El 25 % de los updates comparte
+`timestamp` con otro (hasta 3): el alineador ya fusiona lotes del mismo instante.
+
+* La conexión mantiene un espejo, aplica y recorta cada update y **solo emite si el CRC32
+  coincide**; los niveles recortados salen como bajas explícitas. Ante una discrepancia deja
+  de emitir profundidad y re-suscribe. Contador contiguo por línea (regla `OkxRule`).
+* Precisión del par por REST (`AssetPairs`); sin ella el mercado no arranca (no se podría
+  verificar el checksum). Par por defecto SOL/USD (11× el volumen de SOL/USDT; supuesto
+  1 USD = 1 USDT en el libro unificado, `--kraken-symbol`).
+
+Prueba en vivo (5 min): 0 fallos de checksum, 0 resyncs, 0 sin contabilizar, 0 tardíos.
+**Verificación independiente** (libro propio de otra conexión, comparado solo en instantes
+de `timestamp` único para evitar estados intermedios): **101/101** idénticos. Con los cuatro
+venues activos: 6 mercados, 5 en vivo (Binance perp bloqueado por región en este entorno).
 
 ## 7. Prueba en vivo (2026-09-25, binario release, servidor con 451 en `api` y `fapi`)
 

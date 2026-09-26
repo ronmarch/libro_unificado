@@ -21,11 +21,12 @@ use engine::{ChannelSink, Engine, EngineConfig, EngineMsg, IngestCounters, Strea
 use flow::FlowAgg;
 use lu_binance::{BinanceProtocol, Endpoints, RestClient};
 use lu_book::{BinanceFuturesRule, BinanceSpotRule, OkxRule, SeqRule, SyncBook, SyncConfig};
+use lu_coinbase::CoinbaseProtocol;
 use lu_core::{init_clock, MarketId, MarketKind, Qty, Venue};
 use lu_flow::{Aligner, AlignerConfig};
+use lu_kraken::KrakenProtocol;
 use lu_metrics::{Metrics, MetricsConfig};
 use lu_net::{run_line, FrameSink, LineCmd, LineSpec};
-use lu_coinbase::CoinbaseProtocol;
 use lu_okx::{OkxEndpoints, OkxProtocol};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -36,7 +37,8 @@ use view::Views;
 const USAGE: &str = "\
 uso: lu-node [opciones]
   --symbol SOLUSDT        símbolo (default SOLUSDT)
-  --venues binance        exchanges: binance,okx,coinbase (default binance)
+  --venues binance        exchanges: binance,okx,coinbase,kraken (default binance)
+  --kraken-symbol SOL/USD par Kraken (solo spot; USD se suma como USDT)
   --coinbase-product SOL-USD  producto Coinbase (solo spot; USD se suma como USDT)
   --markets spot,perp     mercados a sincronizar (default spot,perp)
   --lines 2               líneas redundantes por stream, 1..4 (default 2)
@@ -58,6 +60,7 @@ struct Args {
     symbol: String,
     venues: Vec<Venue>,
     coinbase_product: String,
+    kraken_symbol: String,
     markets: Vec<MarketKind>,
     lines: usize,
     listen: SocketAddr,
@@ -73,6 +76,7 @@ fn parse_args() -> Result<Args, String> {
         symbol: "SOLUSDT".into(),
         venues: vec![Venue::Binance],
         coinbase_product: "SOL-USD".into(),
+        kraken_symbol: "SOL/USD".into(),
         markets: vec![MarketKind::Spot, MarketKind::Perp],
         lines: 2,
         listen: "127.0.0.1:9100".parse().map_err(|e| format!("{e}"))?,
@@ -90,6 +94,7 @@ fn parse_args() -> Result<Args, String> {
         match k.as_str() {
             "--symbol" => a.symbol = val()?.to_uppercase(),
             "--coinbase-product" => a.coinbase_product = val()?.to_uppercase(),
+            "--kraken-symbol" => a.kraken_symbol = val()?.to_uppercase(),
             "--venues" => {
                 a.venues = val()?
                     .split(',')
@@ -97,7 +102,10 @@ fn parse_args() -> Result<Args, String> {
                         "binance" => Ok(Venue::Binance),
                         "okx" => Ok(Venue::Okx),
                         "coinbase" => Ok(Venue::Coinbase),
-                        o => Err(format!("venue no soportado aún: {o} (binance, okx, coinbase)")),
+                        "kraken" => Ok(Venue::Kraken),
+                        o => Err(format!(
+                            "venue no soportado aún: {o} (binance, okx, coinbase, kraken)"
+                        )),
                     })
                     .collect::<Result<_, _>>()?
             }
@@ -411,8 +419,16 @@ fn start_coinbase(
         ));
         let tag = if li == 0 { "level2+trades" } else { "trades" };
         rt.spawn(run_line(
-            LineSpec::new(format!("{label}/{tag}"), li as u8, lu_coinbase::proto::WS_URL, tls.clone()),
-            Arc::new(CoinbaseProtocol::new(args.coinbase_product.clone(), li == 0)),
+            LineSpec::new(
+                format!("{label}/{tag}"),
+                li as u8,
+                lu_coinbase::proto::WS_URL,
+                tls.clone(),
+            ),
+            Arc::new(CoinbaseProtocol::new(
+                args.coinbase_product.clone(),
+                li == 0,
+            )),
             sink,
             Some(crx),
             sd_rx.clone(),
@@ -429,6 +445,97 @@ fn start_coinbase(
             while req_rx.try_recv().is_ok() {}
             if start.elapsed() < Duration::from_secs(3) {
                 continue; // la suscripción inicial ya trae snapshot
+            }
+            if let Some(c) = &depth_cmd {
+                let _ = c.send(LineCmd::Resnapshot);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+}
+
+/// Kraken v2: precisión del par por REST (necesaria para el CRC32), línea 0 con libro
+/// verificado por checksum en cada update; las demás, trades.
+#[allow(clippy::too_many_arguments)]
+fn start_kraken(
+    rt: &tokio::runtime::Runtime,
+    args: &Args,
+    market: MarketId,
+    tls: &Arc<rustls::ClientConfig>,
+    tx: crossbeam_channel::Sender<EngineMsg>,
+    counters: Arc<IngestCounters>,
+    mut req_rx: mpsc::UnboundedReceiver<()>,
+    sd_rx: &watch::Receiver<bool>,
+) {
+    let label = market.to_string();
+    let mut prec = None;
+    for intento in 1..=3 {
+        match lu_kraken::pair_precision(tls.clone(), &args.kraken_symbol) {
+            Ok(p) => {
+                prec = Some(p);
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(market = %label, intento, error = %e, "precisión del par Kraken no disponible");
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        }
+    }
+    let Some((price_dec, qty_dec)) = prec else {
+        tracing::error!(market = %label, "sin precisión del par no se puede verificar el checksum: mercado desactivado");
+        return;
+    };
+    let tx2 = tx.clone();
+    let spec = lu_core::InstrumentSpec {
+        market: market.clone(),
+        tick: lu_core::Px::from_raw(10i64.pow(lu_core::DECIMALS - price_dec)),
+        step: Qty::from_raw(10i64.pow(lu_core::DECIMALS - qty_dec)),
+        base_per_contract: Qty::from_units(1),
+    };
+    rt.spawn(async move { snapshot::deliver(&tx2, EngineMsg::Spec(spec)).await });
+    let mut depth_cmd = None;
+    for li in 0..args.lines.max(1) {
+        let (ctx, crx) = mpsc::unbounded_channel();
+        if li == 0 {
+            depth_cmd = Some(ctx);
+        }
+        let sink: Arc<dyn FrameSink> = Arc::new(ChannelSink::new(
+            tx.clone(),
+            counters.clone(),
+            StreamKind::Depth,
+            label.clone(),
+        ));
+        let tag = if li == 0 { "book+trade" } else { "trade" };
+        rt.spawn(run_line(
+            LineSpec::new(
+                format!("{label}/{tag}"),
+                li as u8,
+                lu_kraken::proto::WS_URL,
+                tls.clone(),
+            ),
+            Arc::new(KrakenProtocol::new(
+                args.kraken_symbol.clone(),
+                li == 0,
+                1000,
+                price_dec,
+                qty_dec,
+            )),
+            sink,
+            Some(crx),
+            sd_rx.clone(),
+        ));
+    }
+    let mut sd = sd_rx.clone();
+    rt.spawn(async move {
+        let start = tokio::time::Instant::now();
+        loop {
+            tokio::select! {
+                _ = sd.changed() => return,
+                r = req_rx.recv() => if r.is_none() { return },
+            }
+            while req_rx.try_recv().is_ok() {}
+            if start.elapsed() < Duration::from_secs(3) {
+                continue;
             }
             if let Some(c) = &depth_cmd {
                 let _ = c.send(LineCmd::Resnapshot);
@@ -514,19 +621,23 @@ fn main() {
         .iter()
         .flat_map(|v| args.markets.iter().map(move |k| (*v, *k)))
         .filter(|(v, k)| {
-            let ok = !(*v == Venue::Coinbase && *k == MarketKind::Perp);
+            let spot_only = matches!(v, Venue::Coinbase | Venue::Kraken);
+            let ok = !(spot_only && *k == MarketKind::Perp);
             if !ok {
-                tracing::warn!("Coinbase no tiene perpetuos en su exchange spot: se omite coinbase.perp");
+                tracing::warn!(
+                    venue = v.as_str(),
+                    "venue solo spot en este conector: se omite el perpetuo"
+                );
             }
             ok
         })
         .collect();
     let multi_venue = args.venues.len() > 1;
     for (i, (venue, kind)) in plan.into_iter().enumerate() {
-        let symbol = if venue == Venue::Coinbase {
-            args.coinbase_product.replace('-', "")
-        } else {
-            args.symbol.clone()
+        let symbol = match venue {
+            Venue::Coinbase => args.coinbase_product.replace('-', ""),
+            Venue::Kraken => args.kraken_symbol.replace('/', ""),
+            _ => args.symbol.clone(),
         };
         let market = MarketId::new(venue, kind, symbol);
         let label = market.to_string();
@@ -582,7 +693,7 @@ fn main() {
         };
         let handle = spawn(match (venue, kind) {
             // Coinbase usa un contador contiguo con `prev`: misma regla que OKX.
-            (Venue::Okx | Venue::Coinbase, _) => Rule::Okx,
+            (Venue::Okx | Venue::Coinbase | Venue::Kraken, _) => Rule::Okx,
             (_, MarketKind::Spot) => Rule::BinanceSpot,
             (_, MarketKind::Perp) => Rule::BinanceFutures,
         });
@@ -604,6 +715,16 @@ fn main() {
         }
 
         match venue {
+            Venue::Kraken => start_kraken(
+                &rt,
+                &args,
+                market.clone(),
+                &tls,
+                tx.clone(),
+                counters.clone(),
+                req_rx,
+                &sd_rx,
+            ),
             Venue::Coinbase => start_coinbase(
                 &rt,
                 &args,

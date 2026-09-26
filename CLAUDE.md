@@ -33,10 +33,9 @@ PROPTEST_CASES=20000 cargo test -p lu-metrics --test prop_metrics
 
 F0–F5 hechas para Binance (ver `ARCHITECTURE.md` §5 bis – §5 quinquies). Pendiente:
 
-1. **Venues restantes** (Bybit, Kraken): seguir la plantilla de `crates/lu-okx`
+1. **Venues restantes** (Bybit; perpetuos de Kraken vía Kraken Futures): seguir la plantilla de `crates/lu-okx`
    (`Protocol` de `lu-net` + `SeqRule` + `MarketEvent::Snapshot`). Capturar mensajes reales
    antes de escribir el parser; verificar contra snapshots independientes (ver §6 bis).
-   Kraken valida con CRC32 (activo): falta soporte de checksum en `SyncBook`.
 2. Supuestos de F3 confirmados por el usuario (2026-09-26): R ≈ 1 = 0,8–1,25; alto = ≥ P90;
    referencia del CVD = medio spot; cantidades = foto actual.
 3. Soak de 72 h con Binance real en la VM (`deploy/soak.sh`) y calibrar δ de F2.

@@ -1,0 +1,15 @@
+[package]
+name = "lu-kraken"
+description = "Conector Kraken v2 (spot): book top-N verificado con CRC32 por update, trades"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+lu-core.workspace = true
+lu-net.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+rustls.workspace = true

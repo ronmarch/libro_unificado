@@ -4,7 +4,7 @@ Libros L2 exactos de Binance **spot y USDⓈ-M** (SOLUSDT) en RAM y en tiempo re
 con líneas WebSocket redundantes, sincronización verificada por propiedades,
 alineador trades ↔ depth (F2), velas footprint y detector de muros retirados (F3),
 API WebSocket + interfaz web (F4), simulador con caos y soak (F5). Fases F0–F5 del
-libro unificado multi-exchange (venues: Binance, OKX y Coinbase).
+libro unificado multi-exchange (venues: Binance, OKX, Coinbase y Kraken).
 Diseño completo: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Requisitos
@@ -17,7 +17,7 @@ Diseño completo: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 ## Compilar y verificar
 
 ```bash
-cargo test --workspace                                              # 63 tests
+cargo test --workspace                                              # 68 tests
 PROPTEST_CASES=20000 cargo test -p lu-book --test prop_sync         # estrés (libro)
 PROPTEST_CASES=20000 cargo test -p lu-flow --test prop_flow         # estrés (F2)
 PROPTEST_CASES=20000 cargo test -p lu-metrics --test prop_metrics   # estrés (F3)
@@ -34,8 +34,9 @@ cargo build --release -p lu-node                              # → target/relea
 | Opción | Default | Uso |
 |---|---|---|
 | `--symbol` | `SOLUSDT` | símbolo |
-| `--venues` | `binance` | exchanges: `binance`, `okx`, `coinbase` (varios: `binance,okx,coinbase`) |
+| `--venues` | `binance` | exchanges: `binance`, `okx`, `coinbase`, `kraken` (varios: `binance,okx,coinbase,kraken`) |
 | `--coinbase-product` | `SOL-USD` | producto Coinbase (solo spot; USD se suma como USDT) |
+| `--kraken-symbol` | `SOL/USD` | par Kraken (solo spot; USD se suma como USDT) |
 | `--markets` | `spot,perp` | mercados |
 | `--lines` | `2` | conexiones redundantes por stream (1–4) |
 | `--listen` | `127.0.0.1:9100` | API de observabilidad |

@@ -450,6 +450,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lu-kraken"
+version = "0.1.0"
+dependencies = [
+ "lu-core",
+ "lu-net",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "ureq",
+]
+
+[[package]]
 name = "lu-metrics"
 version = "0.1.0"
 dependencies = [
@@ -487,6 +500,7 @@ dependencies = [
  "lu-coinbase",
  "lu-core",
  "lu-flow",
+ "lu-kraken",
  "lu-metrics",
  "lu-net",
  "lu-okx",

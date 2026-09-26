@@ -225,7 +225,7 @@ pub async fn run_line(
                                     if proto.take_resync() {
                                         match proto.resubscribe() {
                                             Some(msgs) => {
-                                                tracing::warn!(line = spec.line, label = %spec.label, "hueco en la secuencia de la conexión: re-suscripción");
+                                                tracing::warn!(line = spec.line, label = %spec.label, "estado de la conexión inválido (hueco de secuencia o checksum): re-suscripción");
                                                 let mut ok = true;
                                                 for m in msgs {
                                                     ok &= tx.send(Message::text(m)).await.is_ok();
@@ -234,7 +234,7 @@ pub async fn run_line(
                                                     break "error al re-suscribir";
                                                 }
                                             }
-                                            None => break "hueco en la secuencia de la conexión",
+                                            None => break "estado de la conexión inválido",
                                         }
                                     }
                                 }
