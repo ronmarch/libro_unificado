@@ -1,7 +1,7 @@
 # Binarios estáticos (musl) para Linux x86_64 y ARM64 (Oracle Ampere): no requieren
 # Rust ni bibliotecas en el servidor. Se prueban antes de publicarse.
 #
-# * push a main / manual → artefacto descargable en la pestaña Actions.
+# * PR / push a main / manual → artefacto descargable en la pestaña Actions.
 # * tag v* (p. ej. v0.2.0) → además, GitHub Release con los .tar.gz y sus SHA-256.
 name: release
 
@@ -9,6 +9,7 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:
   workflow_dispatch:
 
 permissions:
