@@ -537,8 +537,8 @@ proptest! {
             let l = Level { px: px(c), qty: Qty::from_units(q) };
             match s { Side::Bid => bids.push(l), Side::Ask => asks.push(l) }
         }
-        bids.sort_by(|a, b| b.px.cmp(&a.px));
-        asks.sort_by(|a, b| a.px.cmp(&b.px));
+        bids.sort_by_key(|l| std::cmp::Reverse(l.px));
+        asks.sort_by_key(|l| l.px);
         let mut b = L2Book::new();
         b.load_snapshot(&DepthSnapshot {
             last_update_id: 1, limit, rolling: false, bids, asks, exch_ts_ms: None, rx: RxStamp::default(),
