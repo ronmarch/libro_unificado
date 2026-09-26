@@ -1,0 +1,100 @@
+# Binarios estáticos (musl) para Linux x86_64 y ARM64 (Oracle Ampere): no requieren
+# Rust ni bibliotecas en el servidor. Se prueban antes de publicarse.
+#
+# * push a main / manual → artefacto descargable en la pestaña Actions.
+# * tag v* (p. ej. v0.2.0) → además, GitHub Release con los .tar.gz y sus SHA-256.
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  binarios:
+    name: lu-node ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Herramientas de compilación cruzada (zig)
+        run: pip install ziglang cargo-zigbuild
+
+      - name: Compilar (estático)
+        run: cargo zigbuild --release -p lu-node --target ${{ matrix.target }}
+
+      - name: Prueba x86_64 (exchange simulado 25 s, libro == verdad)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          BIN=target/${{ matrix.target }}/release/lu-node
+          file "$BIN" | grep -q "statically linked"
+          "$BIN" --sim --listen 127.0.0.1:9199 --log warn &
+          PID=$!
+          sleep 25
+          M=$(curl -fsS 127.0.0.1:9199/metrics)
+          kill $PID
+          echo "$M" | grep -E 'lu_sim_checks_total|lu_sync_unaccounted'
+          ok=$(echo "$M" | awk '/lu_sim_checks_total.*result="ok"/ {s+=$NF} END {print s+0}')
+          bad=$(echo "$M" | awk '/lu_sim_checks_total.*result="mismatch"/ {s+=$NF} END {print s+0}')
+          [ "$ok" -gt 0 ] && [ "$bad" -eq 0 ]
+
+      - name: Prueba ARM64 (emulado con QEMU)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static
+          BIN=target/${{ matrix.target }}/release/lu-node
+          file "$BIN" | grep -q "ARM aarch64.*statically linked"
+          qemu-aarch64-static "$BIN" --help | head -3
+          qemu-aarch64-static "$BIN" --sim --listen 127.0.0.1:9198 --log warn &
+          PID=$!
+          sleep 40
+          M=$(curl -fsS 127.0.0.1:9198/metrics)
+          kill $PID
+          echo "$M" | grep -E 'lu_sim_checks_total|lu_sync_unaccounted'
+          bad=$(echo "$M" | awk '/lu_sim_checks_total.*result="mismatch"/ {s+=$NF} END {print s+0}')
+          [ "$bad" -eq 0 ]
+
+      - name: Empaquetar
+        id: pkg
+        run: |
+          VER=${GITHUB_REF_NAME//\//-}
+          NAME=lu-node-${VER}-${{ matrix.target }}
+          mkdir -p dist/$NAME
+          cp target/${{ matrix.target }}/release/lu-node dist/$NAME/
+          cp -r deploy README.md ARCHITECTURE.md dist/$NAME/
+          tar -C dist -czf dist/$NAME.tar.gz $NAME
+          (cd dist && sha256sum $NAME.tar.gz > $NAME.tar.gz.sha256)
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          retention-days: 30
+
+      - name: Publicar en GitHub Release (solo tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256

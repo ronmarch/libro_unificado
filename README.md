@@ -92,6 +92,21 @@ Alarmas recomendadas:
 
 Reglas listas para Prometheus: `deploy/alerts.yml`.
 
+## Binarios listos (sin instalar Rust)
+
+Cada push a `main` compila binarios **estáticos** para Linux x86_64 y ARM64 (Ampere),
+los prueba con el exchange simulado (ARM emulado con QEMU) y los deja en
+*Actions → release → Artifacts*. Con un tag `v*` se publican además en *Releases*.
+
+```bash
+# En la VM (x86_64: VM.Standard.E2.1.Micro; ARM: Ampere A1)
+tar xzf lu-node-*-x86_64-unknown-linux-musl.tar.gz      # o ...-aarch64-...
+sha256sum -c lu-node-*.tar.gz.sha256                    # integridad
+cd lu-node-*/ && ./lu-node --venues binance,okx,bybit,coinbase,kraken
+```
+
+Con 1 GB de RAM (Micro) no conviene compilar en la VM: usar estos binarios.
+
 ## Despliegue en Oracle Always Free (ARM Ampere)
 
 ```bash
